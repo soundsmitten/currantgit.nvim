@@ -9,12 +9,14 @@ local state = {
   configured = false,
   opts = {},
   errors = {},
+  command_log = {},
 }
 
 local open_status
 local open_diff
 local open_deleted
 local open_blame
+local open_activity
 
 local function schedule(callback)
   vim.schedule(function()
@@ -23,6 +25,25 @@ local function schedule(callback)
       state.errors[#state.errors + 1] = error_message
       vim.notify("CurrantGit: " .. error_message, vim.log.levels.ERROR)
     end
+  end)
+end
+
+local function record_command(args, cwd, result, started)
+  local output = vim.trim((result.stdout or "") .. (result.stderr or ""))
+  state.command_log[#state.command_log + 1] = {
+    argv = vim.deepcopy(args),
+    cwd = cwd,
+    code = result.code,
+    duration_ms = math.floor((vim.loop.hrtime() - started) / 1000000),
+    output = output:sub(1, 2000),
+  }
+end
+
+local function execute(args, opts, callback)
+  local started = vim.loop.hrtime()
+  vim.system(args, opts, function(result)
+    record_command(args, opts.cwd, result, started)
+    callback(result)
   end)
 end
 
@@ -38,9 +59,11 @@ local function git_command()
 end
 
 local function repository_root()
+  local started = vim.loop.hrtime()
   local result = vim.system({ git_command(), "rev-parse", "--show-toplevel" }, {
     text = true,
   }):wait()
+  record_command({ git_command(), "rev-parse", "--show-toplevel" }, vim.fn.getcwd(), result, started)
 
   if result.code ~= 0 then
     return nil, result.stderr or "not a Git repository"
@@ -91,7 +114,7 @@ local function action_context(buffer)
       vim.notify("CurrantGit: " .. error_message, vim.log.levels.ERROR)
       return
     end
-    vim.system(vim.list_extend({ git_command() }, args), {
+    execute(vim.list_extend({ git_command() }, args), {
       cwd = result_root,
       text = true,
     }, function(result)
@@ -152,7 +175,7 @@ open_deleted = function(item)
   end
   local revision = item.status:sub(1, 1) == "D" and "HEAD" or ":"
   local target = revision == ":" and (revision .. item.path) or (revision .. ":" .. item.path)
-  vim.system({ git_command(), "show", target }, {
+  execute({ git_command(), "show", target }, {
     cwd = root,
     text = true,
   }, function(result)
@@ -194,7 +217,7 @@ open_blame = function(path)
     vim.cmd("edit " .. vim.fn.fnameescape(root .. "/" .. path))
     source_buffer = vim.api.nvim_get_current_buf()
   end
-  vim.system({ git_command(), "blame", "--line-porcelain", "--", path }, {
+  execute({ git_command(), "blame", "--line-porcelain", "--", path }, {
     cwd = root,
     text = true,
   }, function(result)
@@ -313,7 +336,7 @@ open_diff_args = function(args)
     vim.notify("CurrantGit: " .. error_message, vim.log.levels.ERROR)
     return
   end
-  vim.system(vim.list_extend({ git_command() }, args), {
+  execute(vim.list_extend({ git_command() }, args), {
     cwd = root,
     text = true,
   }, function(result)
@@ -436,7 +459,7 @@ open_status = function()
     return
   end
 
-  vim.system({ git_command(), "status", "--short", "--branch" }, {
+  execute({ git_command(), "status", "--short", "--branch" }, {
     cwd = root,
     text = true,
   }, function(result)
@@ -459,7 +482,7 @@ local function run_git(args)
     return
   end
 
-  vim.system(vim.list_extend({ git_command() }, args), {
+  execute(vim.list_extend({ git_command() }, args), {
     cwd = root,
     text = true,
   }, function(result)
@@ -471,6 +494,32 @@ local function run_git(args)
       set_buffer(vim.split(vim.trim(output), "\n", { plain = true }), {}, "command")
     end)
   end)
+end
+
+open_activity = function()
+  local lines = { "CurrantGit activity", "" }
+  if #state.command_log == 0 then
+    lines[#lines + 1] = "  no Git commands recorded"
+  else
+    for index, entry in ipairs(state.command_log) do
+      lines[#lines + 1] = string.format(
+        "%3d  %4dms  [%d]  %s",
+        index,
+        entry.duration_ms,
+        entry.code,
+        table.concat(entry.argv, " ")
+      )
+      if entry.output ~= "" then
+        for output_line in (entry.output .. "\n"):gmatch("(.-)\n") do
+          lines[#lines + 1] = "      " .. output_line
+        end
+      end
+    end
+  end
+  navigation.update(0)
+  set_buffer(lines, {}, "activity", {}, vim.fn.getcwd())
+  vim.b.currantgit_command_log = state.command_log
+  navigation.visit(0)
 end
 
 function M.git(args)
@@ -488,6 +537,10 @@ function M.git(args)
   else
     run_git(args)
   end
+end
+
+function M.command_log()
+  return vim.deepcopy(state.command_log)
 end
 
 function M.setup(opts)
@@ -608,6 +661,9 @@ function M.setup(opts)
     nargs = "*",
     complete = "shellcmd",
   })
+  vim.api.nvim_create_user_command("GitActivity", function()
+    open_activity()
+  end, {})
   state.configured = true
   return M
 end
