@@ -73,6 +73,29 @@ these, see [`decisions/`](decisions/).
   last file always has a hunk will crash on it. See
   [`decisions/0006`](decisions/0006-diff-parse-tolerates-trailing-hunkless-file.md).
 
+- **`git rev-parse --show-toplevel` itself fails cleanly (exit 128, `fatal:
+  this operation must be run in a work tree`) inside a bare repository.**
+  This means CurrantGit's `repository_root()` already refuses a bare
+  repository before any status/diff/log/blame command is even attempted —
+  no special bare-repo detection needed on top of the existing
+  `repository_root()` failure check. Don't add redundant
+  `--is-bare-repository` probing; verify first that the existing failure
+  path doesn't already cover the case (see
+  [`decisions/0009`](decisions/0009-bare-detached-unborn-verified-safe.md)).
+
+- **`## HEAD (no branch)` and `## No commits yet on <branch>` are real,
+  valid `git status --porcelain=v1 -z --branch` header lines** for detached
+  HEAD and an unborn branch respectively — not malformed input. CurrantGit's
+  status parser already passes them through as the branch display string
+  as-is; no special-casing was needed once verified.
+
+- **`git log`/`git blame` on an unborn branch (zero commits) fail with a
+  real Git error** (`fatal: your current branch '<name>' does not have any
+  commits yet` / `fatal: no such ref: HEAD`, both exit 128) rather than
+  returning empty output. `git diff` on the same repo just succeeds with
+  empty output (nothing to compare). All three are ordinary Git behavior a
+  caller must be ready to see, not edge cases specific to this codebase.
+
 ## Neovim / test harness
 
 - **A Lua `nvim_create_user_command` callback's `args` field is the raw,

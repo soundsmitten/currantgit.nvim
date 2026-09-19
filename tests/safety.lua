@@ -428,6 +428,110 @@ local function test_git_command_quoted_args()
   vim.fn.delete(repo, "rf")
 end
 
+-- 8. Bare repository (audit continuation item 2): a bare repo has no
+-- working tree, so `git rev-parse --show-toplevel` (which `repository_root`
+-- relies on) fails with a clear, real Git error rather than returning a
+-- path. Every top-level entry point must surface that failure as a boring
+-- notification and never crash or render a misleading/empty surface.
+local function test_bare_repository_refuses_cleanly()
+  local dir = vim.fn.tempname()
+  git({ "init", "-q", "--bare", dir })
+
+  vim.cmd("cd " .. vim.fn.fnameescape(dir))
+  local before_buffer = vim.api.nvim_get_current_buf()
+  currantgit.git({})
+  vim.wait(300, function() return false end, 10)
+  -- `repository_root()` fails before `open_status` ever calls `set_buffer`
+  -- (which always switches the current buffer), so the current buffer must
+  -- be unchanged. Checking the *previously current* buffer's filetype would
+  -- be wrong: it could already be a reused `currantgit://status` buffer left
+  -- over from an earlier test in this same Neovim instance (see
+  -- docs/gotchas.md on stale-render buffer reuse).
+  assert(vim.api.nvim_get_current_buf() == before_buffer,
+    "a bare repository has no working tree; :Git status must not render a status surface")
+
+  currantgit.git({ "log" })
+  vim.wait(300, function() return false end, 10)
+  currantgit.git({ "diff" })
+  vim.wait(300, function() return false end, 10)
+  assert(#currantgit.errors() == 0,
+    "bare-repository commands must fail as clean notifications, not crashes: "
+      .. table.concat(currantgit.errors(), "\n"))
+
+  vim.cmd("cd " .. vim.fn.fnameescape(original_cwd))
+  vim.fn.delete(dir, "rf")
+end
+
+-- 9. Detached HEAD (audit continuation item 2): `## HEAD (no branch)` is a
+-- real, valid `git status --porcelain=v1 -z --branch` header line, and every
+-- ordinary action (status render, diff) must keep working normally against
+-- a detached-HEAD checkout.
+local function test_detached_head()
+  local repo = make_repo()
+  write_file(repo .. "/f.txt", "one\n")
+  git({ "add", "f.txt" }, repo)
+  git({ "commit", "-q", "-m", "c1" }, repo)
+  write_file(repo .. "/f.txt", "one\ntwo\n")
+  git({ "add", "f.txt" }, repo)
+  git({ "commit", "-q", "-m", "c2" }, repo)
+  git({ "checkout", "-q", "--detach", "HEAD~1" }, repo)
+  write_file(repo .. "/f.txt", "one\ndetached-edit\n")
+
+  vim.cmd("cd " .. vim.fn.fnameescape(repo))
+  open_status_and_wait()
+  assert_contains(vim.api.nvim_buf_get_lines(0, 0, -1, false), "HEAD (no branch)")
+  goto_item("f.txt")
+
+  local before_buffer = vim.api.nvim_get_current_buf()
+  local before_tick = vim.api.nvim_buf_get_changedtick(before_buffer)
+  local diff_mapping = vim.fn.maparg("d", "n", false, true)
+  assert(diff_mapping.callback, "diff mapping was not registered")
+  diff_mapping.callback()
+  assert(vim.wait(3000, function()
+    return vim.bo.filetype == "diff"
+      and (vim.api.nvim_get_current_buf() ~= before_buffer
+        or vim.api.nvim_buf_get_changedtick(before_buffer) > before_tick)
+  end, 10), "diff did not open against a detached-HEAD checkout")
+  assert_contains(vim.api.nvim_buf_get_lines(0, 0, -1, false), "+detached-edit")
+  assert(#currantgit.errors() == 0, table.concat(currantgit.errors(), "\n"))
+
+  vim.cmd("cd " .. vim.fn.fnameescape(original_cwd))
+  vim.fn.delete(repo, "rf")
+end
+
+-- 10. Unborn branch / zero-commit repository (audit continuation item 2):
+-- `## No commits yet on <branch>` is a real, valid status header, `git log`
+-- and `git blame` both fail with a real, expected Git error (no HEAD to
+-- resolve yet) rather than hanging or crashing, and `git diff` against an
+-- empty index/worktree is simply empty.
+local function test_unborn_branch()
+  local dir = vim.fn.tempname()
+  vim.fn.mkdir(dir, "p")
+  git({ "init", "-q", "-b", "main" }, dir)
+  git({ "config", "user.name", "CurrantGit Safety" }, dir)
+  git({ "config", "user.email", "safety@currantgit.invalid" }, dir)
+  write_file(dir .. "/f.txt", "content\n")
+
+  vim.cmd("cd " .. vim.fn.fnameescape(dir))
+  open_status_and_wait()
+  assert_contains(vim.api.nvim_buf_get_lines(0, 0, -1, false), "No commits yet on main")
+  assert_contains(vim.api.nvim_buf_get_lines(0, 0, -1, false), "f.txt")
+
+  currantgit.git({ "log" })
+  vim.wait(300, function() return false end, 10)
+  currantgit.git({ "diff" })
+  vim.wait(300, function() return false end, 10)
+  vim.cmd("edit " .. vim.fn.fnameescape(dir .. "/f.txt"))
+  currantgit.git({ "blame", "f.txt" })
+  vim.wait(300, function() return false end, 10)
+  assert(#currantgit.errors() == 0,
+    "unborn-branch log/diff/blame must fail as clean notifications, not crashes: "
+      .. table.concat(currantgit.errors(), "\n"))
+
+  vim.cmd("cd " .. vim.fn.fnameescape(original_cwd))
+  vim.fn.delete(dir, "rf")
+end
+
 test_cwd_race()
 test_glob_pathspec()
 test_blame_multiline()
@@ -435,5 +539,8 @@ test_diff_trailing_binary()
 test_status_rename_and_status_codes()
 test_diff_mode_trust()
 test_git_command_quoted_args()
+test_bare_repository_refuses_cleanly()
+test_detached_head()
+test_unborn_branch()
 assert(#currantgit.errors() == 0, table.concat(currantgit.errors(), "\n"))
 print("CurrantGit safety: ok")
