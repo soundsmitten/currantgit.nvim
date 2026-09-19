@@ -158,6 +158,17 @@ end)
 assert_no_async_errors()
 assert(vim.b.currantgit_title == "status", ":Git status did not use the status projection")
 
+vim.cmd("Git diff --cached")
+vim.wait(5000, function() return vim.bo.filetype == "diff" end)
+assert(vim.bo.filetype == "diff", ":Git diff --cached should use the diff surface")
+assert_contains(vim.api.nvim_buf_get_lines(0, 0, -1, false), "staged.txt")
+assert(vim.api.nvim_buf_get_lines(0, 0, -1, false)[1]:find("staged.txt", 1, true), "staged diff should identify its path")
+vim.cmd("Git status")
+vim.wait(5000, function()
+  return vim.bo.filetype == "currantgit" and vim.b.currantgit_title == "status"
+end)
+assert_no_async_errors()
+
 goto_item("discard.txt")
 local discard_mapping = vim.fn.maparg("X", "n", false, true)
 assert(discard_mapping.callback, "discard mapping was not registered")
