@@ -65,7 +65,7 @@ When you want to tune the surface, options stay small and discoverable:
 require("currantgit").setup({
   git = { command = "git" },
   ui = {
-    title = "CurrantGit",
+    title = "My Git",
     show_clean = true,
     show_branch = true,
     show_counts = true,
@@ -81,7 +81,8 @@ require("currantgit").setup({
 ```
 
 Configuration is deeply merged over opinionated defaults and validated during
-setup. Options describe product behavior, not renderer internals.
+setup. By default, the status header uses the repository name; a title is an
+opt-in prefix. Options describe product behavior, not renderer internals.
 
 ## Architecture
 

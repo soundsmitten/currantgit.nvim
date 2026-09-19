@@ -151,7 +151,9 @@ end
 local function parse_status(stdout)
   local items = {}
   local ui = config.get().ui
-  local lines = { ui.title .. "  " .. vim.fn.fnamemodify(vim.fn.getcwd(), ":t") }
+  local repository_name = vim.fn.fnamemodify(vim.fn.getcwd(), ":t")
+  local header = ui.title and (ui.title .. "  " .. repository_name) or repository_name
+  local lines = { header }
   local branch = ""
   local changes = {}
   local line_items = {}

@@ -9,7 +9,7 @@ end
 
 local currantgit = require("currantgit")
 local defaults = currantgit.get_config()
-assert(defaults.ui.title == "CurrantGit", "configuration defaults are not loaded")
+assert(defaults.ui.title == nil, "status headers should default to the repository name")
 assert(defaults.ui.icons.modified == "M", "configuration icon defaults are not loaded")
 
 local function assert_no_async_errors()
@@ -24,7 +24,7 @@ end)
 assert(vim.bo.filetype == "currantgit", "Git status did not open a CurrantGit surface")
 assert_no_async_errors()
 local lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
-assert_contains(lines, "CurrantGit")
+assert(not lines[1]:find("CurrantGit", 1, true), "default status header should not contain the plugin name")
 assert_contains(lines, "Changes")
 assert(vim.b.currantgit_items, "status surface did not expose semantic items")
 assert(#vim.b.currantgit_items >= 2, "fixture should expose modified and untracked items")
