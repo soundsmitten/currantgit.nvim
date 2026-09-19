@@ -30,6 +30,12 @@ STATUS                                                          *currantgit-stat
 The status surface is buffer-native and read-only. It exposes semantic change
 items rather than making rendered lines the source of truth.
 
+Changes are grouped into semantic sections when present: staged changes,
+unstaged changes, untracked files, and conflicts. Sections are native folds;
+the usual |fold-commands| work without a CurrantGit-specific replacement.
+Section headings include their current item count, while the item identity and
+available actions remain attached to the item below the heading.
+
 On a change item:
 
 <CR>                    Open the file.

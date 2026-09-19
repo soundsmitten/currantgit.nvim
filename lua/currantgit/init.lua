@@ -125,7 +125,7 @@ local function attach_status(buffer)
   update_discovery(buffer)
 end
 
-local function set_buffer(lines, items, title, line_items, root)
+local function set_buffer(lines, items, title, line_items, root, fold_levels)
   local name = "currantgit://" .. title
   local buffer = vim.fn.bufnr(name)
   if buffer < 0 or not vim.api.nvim_buf_is_valid(buffer) then
@@ -144,8 +144,15 @@ local function set_buffer(lines, items, title, line_items, root)
   vim.bo[buffer].readonly = true
   vim.b[buffer].currantgit_items = items
   vim.b[buffer].currantgit_line_items = line_items or {}
+  vim.b[buffer].currantgit_fold_levels = fold_levels or {}
   vim.b[buffer].currantgit_root = root
   vim.b[buffer].currantgit_title = title
+  vim.wo.foldmethod = title == "status" and "expr" or "manual"
+  if title == "status" then
+    vim.wo.foldexpr = "v:lua.require'currantgit'.foldexpr(v:lnum)"
+    vim.wo.foldlevel = 99
+    vim.wo.foldenable = true
+  end
   if title == "status" then
     attach_status(buffer)
   end
@@ -159,8 +166,15 @@ local function parse_status(stdout)
   local header = ui.title and (ui.title .. "  " .. repository_name) or repository_name
   local lines = { header }
   local branch = ""
-  local changes = {}
   local line_items = {}
+  local fold_levels = {}
+  local section_nodes = {}
+  local sections = {
+    staged = { label = "Staged changes", items = {} },
+    unstaged = { label = "Unstaged changes", items = {} },
+    untracked = { label = "Untracked files", items = {} },
+    conflicts = { label = "Conflicts", items = {} },
+  }
 
   for line in (stdout .. "\n"):gmatch("(.-)\n") do
     if vim.startswith(line, "## ") then
@@ -173,16 +187,29 @@ local function parse_status(stdout)
         or status:find("A", 1, true) and "added"
         or status:find("?", 1, true) and "untracked"
         or "modified"
+      local is_untracked = status == "??"
+      local is_conflict = status:find("[DAU][DAU]", 1) ~= nil
       local item = {
         id = "change:" .. path,
         kind = "change",
-        change_kind = change_kind,
+        change_kind = is_conflict and "conflict" or change_kind,
         path = path,
         status = status,
         capabilities = { "open", "diff", "stage" },
       }
       items[#items + 1] = item
-      changes[#changes + 1] = string.format("  %s  %s", ui.icons[change_kind] or status, path)
+      if is_conflict then
+        sections.conflicts.items[#sections.conflicts.items + 1] = item
+      elseif is_untracked then
+        sections.untracked.items[#sections.untracked.items + 1] = item
+      else
+        if status:sub(1, 1) ~= " " then
+          sections.staged.items[#sections.staged.items + 1] = item
+        end
+        if status:sub(2, 2) ~= " " then
+          sections.unstaged.items[#sections.unstaged.items + 1] = item
+        end
+      end
     end
   end
 
@@ -191,17 +218,40 @@ local function parse_status(stdout)
   end
   lines[#lines + 1] = ""
   lines[#lines + 1] = ui.show_counts and string.format("Changes (%d)", #items) or "Changes"
-  if #changes > 0 then
-    for index, change in ipairs(changes) do
-      lines[#lines + 1] = change
-      line_items[#lines] = items[index]
+  fold_levels[#lines] = 0
+  local section_order = { "staged", "unstaged", "untracked", "conflicts" }
+  for _, section_kind in ipairs(section_order) do
+    local section = sections[section_kind]
+    if #section.items > 0 then
+      local node = {
+        id = "status:section:" .. section_kind,
+        kind = "section",
+        section_kind = section_kind,
+        label = section.label,
+        count = #section.items,
+        children = section.items,
+        capabilities = { "collapse" },
+      }
+      section_nodes[#section_nodes + 1] = node
+      lines[#lines + 1] = string.format("%s (%d)", section.label, #section.items)
+      line_items[#lines] = node
+      fold_levels[#lines] = 1
+      for _, item in ipairs(section.items) do
+        lines[#lines + 1] = string.format("  %s  %s", ui.icons[item.change_kind] or item.status, item.path)
+        line_items[#lines] = item
+        fold_levels[#lines] = 2
+      end
     end
-  elseif ui.show_clean then
+  end
+  if #items == 0 and ui.show_clean then
     lines[#lines + 1] = "  clean"
+    fold_levels[#lines] = 0
   end
   lines[#lines + 1] = ""
+  fold_levels[#lines] = 0
   lines[#lines + 1] = ""
-  return lines, items, line_items
+  fold_levels[#lines] = 0
+  return lines, items, line_items, fold_levels, section_nodes
 end
 
 open_status = function()
@@ -220,8 +270,9 @@ open_status = function()
         vim.notify("CurrantGit: " .. (result.stderr or "git status failed"), vim.log.levels.ERROR)
         return
       end
-      local lines, items, line_items = parse_status(result.stdout or "")
-      set_buffer(lines, items, "status", line_items, root)
+      local lines, items, line_items, fold_levels, section_nodes = parse_status(result.stdout or "")
+      set_buffer(lines, items, "status", line_items, root, fold_levels)
+      vim.b.currantgit_sections = section_nodes
     end)
   end)
 end
@@ -317,6 +368,10 @@ end
 
 function M.errors()
   return state.errors
+end
+
+function M.foldexpr(line)
+  return vim.b.currantgit_fold_levels[line] or 0
 end
 
 return M

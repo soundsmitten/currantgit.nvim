@@ -28,6 +28,16 @@ assert(not lines[1]:find("CurrantGit", 1, true), "default status header should n
 assert_contains(lines, "Changes")
 assert(vim.b.currantgit_items, "status surface did not expose semantic items")
 assert(#vim.b.currantgit_items >= 2, "fixture should expose modified and untracked items")
+assert(vim.wo.foldmethod == "expr", "status surface should use native expression folds")
+assert(#vim.b.currantgit_sections == 2, "fixture should expose unstaged and untracked sections")
+
+local unstaged_line = vim.fn.search("Unstaged changes")
+assert(unstaged_line > 0, "unstaged section is missing")
+assert(vim.fn.foldlevel(unstaged_line) == 1, "section should be a fold root")
+assert(vim.fn.foldlevel(unstaged_line + 1) == 2, "section items should be nested under the fold root")
+vim.cmd("normal! zc")
+assert(vim.fn.foldclosed(unstaged_line) == unstaged_line, "section should collapse with native fold commands")
+vim.cmd("normal! zo")
 
 vim.fn.search("tracked.txt")
 local actions = require("currantgit.actions").available(vim.b.currantgit_items[1], { buffer = 0 })
