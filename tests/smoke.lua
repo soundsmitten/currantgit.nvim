@@ -222,5 +222,26 @@ assert(vim.api.nvim_buf_get_name(0):find("currantgit://deleted/deleted.txt", 1, 
 assert_contains(vim.api.nvim_buf_get_lines(0, 0, -1, false), "gone")
 assert(vim.bo.readonly, "deleted historical view should be read-only")
 
+vim.cmd("Git status")
+vim.wait(5000, function()
+  return vim.bo.filetype == "currantgit" and vim.b.currantgit_title == "status"
+end)
+goto_item("tracked.txt")
+local blame_mapping = vim.fn.maparg("b", "n", false, true)
+assert(blame_mapping.callback, "blame mapping was not registered")
+blame_mapping.callback()
+vim.wait(5000, function()
+  return vim.api.nvim_buf_get_name(0):find("currantgit://blame/tracked.txt", 1, true) ~= nil
+end)
+assert(vim.api.nvim_buf_get_name(0):find("currantgit://blame/tracked.txt", 1, true), "blame action did not open a companion buffer")
+assert(vim.bo.filetype == "git", "blame surface should use the git filetype")
+assert_contains(vim.api.nvim_buf_get_lines(0, 0, -1, false), "CurrantGit Harness")
+assert(#vim.api.nvim_list_wins() == 2, "blame should preserve the source in a companion split")
+local blame_close_mapping = vim.fn.maparg("gq", "n", false, true)
+assert(blame_close_mapping.callback, "blame close mapping was not registered")
+blame_close_mapping.callback()
+vim.wait(2000, function() return #vim.api.nvim_list_wins() == 1 end)
+assert(#vim.api.nvim_list_wins() == 1, "gq should close blame and return to the source")
+
 print("CurrantGit smoke: ok")
 vim.cmd("qa!")

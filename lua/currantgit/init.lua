@@ -1,6 +1,7 @@
 local M = {}
 local config = require("currantgit.config")
 local actions = require("currantgit.actions")
+local blame = require("currantgit.blame")
 local diff = require("currantgit.diff")
 local navigation = require("currantgit.navigation")
 
@@ -13,6 +14,7 @@ local state = {
 local open_status
 local open_diff
 local open_deleted
+local open_blame
 
 local function schedule(callback)
   vim.schedule(function()
@@ -120,6 +122,9 @@ local function action_context(buffer)
     diff = function(item)
       open_diff(item)
     end,
+    blame = function(item)
+      open_blame(item.path)
+    end,
     stage = function(item)
       action({ "add", "--", item.path }, open_status)
     end,
@@ -178,6 +183,61 @@ open_deleted = function(item)
   end)
 end
 
+open_blame = function(path)
+  local root, error_message = repository_root()
+  if not root then
+    vim.notify("CurrantGit: " .. error_message, vim.log.levels.ERROR)
+    return
+  end
+  local source_buffer = vim.api.nvim_get_current_buf()
+  if vim.fn.fnamemodify(vim.api.nvim_buf_get_name(source_buffer), ":.") ~= path then
+    vim.cmd("edit " .. vim.fn.fnameescape(root .. "/" .. path))
+    source_buffer = vim.api.nvim_get_current_buf()
+  end
+  vim.system({ git_command(), "blame", "--line-porcelain", "--", path }, {
+    cwd = root,
+    text = true,
+  }, function(result)
+    schedule(function()
+      if result.code ~= 0 then
+        vim.notify("CurrantGit: " .. (result.stderr or "git blame failed"), vim.log.levels.ERROR)
+        return
+      end
+      local rows = blame.parse(result.stdout or "")
+      vim.cmd("botright vsplit")
+      local buffer = vim.api.nvim_create_buf(false, true)
+      vim.api.nvim_set_current_buf(buffer)
+      vim.api.nvim_buf_set_name(buffer, "currantgit://blame/" .. path)
+      vim.api.nvim_buf_set_lines(buffer, 0, -1, false, blame.render(rows))
+      vim.bo[buffer].buftype = "nofile"
+      vim.bo[buffer].bufhidden = "hide"
+      vim.bo[buffer].modifiable = false
+      vim.bo[buffer].readonly = true
+      vim.bo[buffer].filetype = "git"
+      vim.b[buffer].currantgit_title = "blame"
+      vim.b[buffer].currantgit_blame_rows = rows
+      vim.b[buffer].currantgit_blame_source = source_buffer
+      vim.keymap.set("n", "gq", function() vim.cmd("close") end, {
+        buffer = buffer,
+        silent = true,
+        desc = "Close blame and return",
+      })
+      local group = vim.api.nvim_create_augroup("CurrantGitBlame" .. buffer, { clear = true })
+      vim.api.nvim_create_autocmd("CursorMoved", {
+        group = group,
+        buffer = buffer,
+        callback = function()
+          local row = vim.b[buffer].currantgit_blame_rows[vim.api.nvim_win_get_cursor(0)[1]]
+          if row and vim.api.nvim_buf_is_valid(source_buffer) then
+            vim.api.nvim_win_set_cursor(0, { row.line, 0 })
+          end
+        end,
+      })
+      navigation.visit(0)
+    end)
+  end)
+end
+
 local function dispatch_current(buffer, id)
   local item = current_item(buffer)
   local ok, error_message = actions.dispatch(id, action_context(buffer), item)
@@ -193,6 +253,7 @@ local function attach_status(buffer)
   end
   map("n", "<CR>", function() dispatch_current(buffer, "item.open") end)
   map("n", "d", function() dispatch_current(buffer, "item.diff") end)
+  map("n", "b", function() dispatch_current(buffer, "item.blame") end)
   map("n", "s", function() dispatch_current(buffer, "item.stage") end)
   map("n", "u", function() dispatch_current(buffer, "item.unstage") end)
   map("n", "-", function() dispatch_current(buffer, "item.toggle") end)
@@ -417,6 +478,13 @@ function M.git(args)
     open_status()
   elseif args[1] == "diff" then
     open_diff_args(args)
+  elseif args[1] == "blame" then
+    local path = args[2] or vim.fn.expand("%:~:.")
+    if path == "" or vim.bo.filetype == "currantgit" then
+      vim.notify("CurrantGit: :Git blame needs a file path from a source buffer", vim.log.levels.WARN)
+      return
+    end
+    open_blame(path)
   else
     run_git(args)
   end
@@ -516,6 +584,19 @@ function M.setup(opts)
     applies_to = { "change" },
     run = function(context, item)
       context.diff(item)
+      return true
+    end,
+  })
+  actions.register({
+    id = "item.blame",
+    label = "blame",
+    key = "b",
+    applies_to = { "change" },
+    is_available = function(_, item)
+      return item.change_kind ~= "deleted"
+    end,
+    run = function(context, item)
+      context.blame(item)
       return true
     end,
   })
