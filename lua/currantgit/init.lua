@@ -5,9 +5,20 @@ local actions = require("currantgit.actions")
 local state = {
   configured = false,
   opts = {},
+  errors = {},
 }
 
 local open_status
+
+local function schedule(callback)
+  vim.schedule(function()
+    local ok, error_message = xpcall(callback, debug.traceback)
+    if not ok then
+      state.errors[#state.errors + 1] = error_message
+      vim.notify("CurrantGit: " .. error_message, vim.log.levels.ERROR)
+    end
+  end)
+end
 
 local function split_args(args)
   if args == "" then
@@ -99,7 +110,9 @@ local function attach_status(buffer)
   map("n", "d", function() dispatch_current(buffer, "item.diff") end)
   map("n", "r", function() dispatch_current(buffer, "surface.refresh") end)
   map("n", "g?", function() dispatch_current(buffer, "surface.help") end)
+  local group = vim.api.nvim_create_augroup("CurrantGitStatus" .. buffer, { clear = true })
   vim.api.nvim_create_autocmd("CursorMoved", {
+    group = group,
     buffer = buffer,
     callback = function()
       update_discovery(buffer)
@@ -109,14 +122,20 @@ local function attach_status(buffer)
 end
 
 local function set_buffer(lines, items, title, line_items, root)
-  local buffer = vim.api.nvim_create_buf(false, true)
-  vim.api.nvim_buf_set_name(buffer, "currantgit://" .. title)
+  local name = "currantgit://" .. title
+  local buffer = vim.fn.bufnr(name)
+  if buffer < 0 or not vim.api.nvim_buf_is_valid(buffer) then
+    buffer = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_name(buffer, name)
+  end
   vim.api.nvim_set_current_buf(buffer)
   vim.bo[buffer].buftype = "nofile"
   vim.bo[buffer].bufhidden = "wipe"
   vim.bo[buffer].modifiable = true
   vim.bo[buffer].filetype = "currantgit"
-  vim.api.nvim_buf_set_lines(buffer, 0, -1, false, lines)
+  set_modifiable(buffer, function()
+    vim.api.nvim_buf_set_lines(buffer, 0, -1, false, lines)
+  end)
   vim.bo[buffer].modifiable = false
   vim.bo[buffer].readonly = true
   vim.b[buffer].currantgit_items = items
@@ -190,7 +209,7 @@ open_status = function()
     cwd = root,
     text = true,
   }, function(result)
-    vim.schedule(function()
+    schedule(function()
       if result.code ~= 0 then
         vim.notify("CurrantGit: " .. (result.stderr or "git status failed"), vim.log.levels.ERROR)
         return
@@ -212,7 +231,7 @@ local function run_git(args)
     cwd = root,
     text = true,
   }, function(result)
-    vim.schedule(function()
+    schedule(function()
       local output = result.stdout or ""
       if result.code ~= 0 then
         output = (result.stderr or "git command failed") .. "\n" .. output
@@ -288,6 +307,10 @@ end
 
 function M.get_config()
   return config.get()
+end
+
+function M.errors()
+  return state.errors
 end
 
 return M
