@@ -532,6 +532,217 @@ local function test_unborn_branch()
   vim.fn.delete(dir, "rf")
 end
 
+local function open_diff_and_wait(args)
+  local before_buffer = vim.api.nvim_get_current_buf()
+  local before_tick = vim.api.nvim_buf_get_changedtick(before_buffer)
+  currantgit.git(args)
+  assert(vim.wait(3000, function()
+    return vim.bo.filetype == "diff"
+      and (vim.api.nvim_get_current_buf() ~= before_buffer
+        or vim.api.nvim_buf_get_changedtick(before_buffer) > before_tick)
+  end, 10), "diff did not open for " .. table.concat(args, " "))
+end
+
+-- Stages the hunk under the cursor and waits for BOTH the real Git state
+-- (`git_predicate`, independently re-derived) and CurrantGit's own
+-- post-stage refresh (`open_diff_args` re-running `git diff`) to actually
+-- finish, not just the former. Waiting on real Git state alone is not
+-- enough here: `stage_hunk`'s callback kicks off its own async `git diff`
+-- refresh, and if a test moves on (and deletes its repo) before that
+-- refresh's subprocess has actually spawned, it fails later with an ENOENT
+-- against a directory that no longer exists -- corrupting an unrelated
+-- later test. See docs/gotchas.md on waiting for genuine completion, not a
+-- flag/state a stale render could already satisfy.
+local function stage_current_hunk_and_wait(git_predicate)
+  local before_buffer = vim.api.nvim_get_current_buf()
+  local before_tick = vim.api.nvim_buf_get_changedtick(before_buffer)
+  local stage_mapping = vim.fn.maparg("s", "n", false, true)
+  assert(stage_mapping.callback, "stage-hunk mapping was not registered")
+  stage_mapping.callback()
+  assert(vim.wait(3000, function()
+    return git_predicate()
+      and vim.bo.filetype == "diff"
+      and (vim.api.nvim_get_current_buf() ~= before_buffer
+        or vim.api.nvim_buf_get_changedtick(before_buffer) > before_tick)
+  end, 10), "hunk stage did not settle")
+end
+
+local function goto_hunk(index)
+  index = index or 1
+  local found = 0
+  local lines = {}
+  for line, item in pairs(vim.b.currantgit_line_items or {}) do
+    if type(item) == "table" and item.kind == "hunk" then lines[#lines + 1] = line end
+  end
+  table.sort(lines)
+  local line = lines[index]
+  assert(line, "expected at least " .. index .. " hunk(s) in the diff")
+  vim.api.nvim_win_set_cursor(0, { line, 0 })
+end
+
+-- 11. `git apply --cached` on a hunk touching a file with no trailing
+-- newline (audit continuation item 3): Git represents this with a literal
+-- `\ No newline at end of file` marker line in the diff. Staging must
+-- reproduce the exact byte content, not silently gain or lose a trailing
+-- newline.
+local function test_hunk_stage_no_trailing_newline()
+  local repo = make_repo()
+  write_file(repo .. "/f.txt", "line1\nline2")
+  git({ "add", "f.txt" }, repo)
+  git({ "commit", "-q", "-m", "base" }, repo)
+  write_file(repo .. "/f.txt", "line1\nline2-changed")
+
+  vim.cmd("cd " .. vim.fn.fnameescape(repo))
+  open_diff_and_wait({ "diff", "--", "f.txt" })
+  goto_hunk(1)
+  stage_current_hunk_and_wait(function()
+    return git({ "diff", "--cached", "--name-only" }, repo) == "f.txt"
+  end)
+
+  local staged = git({ "cat-file", "blob", ":f.txt" }, repo)
+  assert(staged == "line1\nline2-changed",
+    "staged blob must byte-match the working tree content exactly, got: " .. vim.inspect(staged))
+  assert(git({ "diff", "--name-only" }, repo) == "", "the file should now be fully staged")
+  assert(#currantgit.errors() == 0, table.concat(currantgit.errors(), "\n"))
+
+  vim.cmd("cd " .. vim.fn.fnameescape(original_cwd))
+  vim.fn.delete(repo, "rf")
+end
+
+-- 12. Sequential multi-hunk staging (audit continuation item 3):
+-- stage_hunk/unstage_hunk always re-run `git diff` after mutating the index
+-- (see `open_diff_args` callback in `action_context`), so a second hunk's
+-- patch is regenerated against the now-current index rather than reused
+-- stale. Staging both hunks in a two-hunk file, one at a time, must fully
+-- stage the file with nothing left unstaged.
+local function test_hunk_stage_sequential_multi_hunk()
+  local repo = make_repo()
+  local lines = {}
+  for line_number = 1, 20 do lines[line_number] = tostring(line_number) end
+  write_file(repo .. "/f.txt", table.concat(lines, "\n") .. "\n")
+  git({ "add", "f.txt" }, repo)
+  git({ "commit", "-q", "-m", "base" }, repo)
+  lines[2] = "TWO-changed"
+  lines[18] = "EIGHTEEN-changed"
+  write_file(repo .. "/f.txt", table.concat(lines, "\n") .. "\n")
+
+  vim.cmd("cd " .. vim.fn.fnameescape(repo))
+  open_diff_and_wait({ "diff", "--", "f.txt" })
+  goto_hunk(1)
+  -- `currantgit_line_items` maps every LINE inside a hunk's body to that
+  -- same hunk object (see diff.lua), so counting entries there counts lines,
+  -- not hunks. `currantgit_diff_hunks` is the actual per-hunk list.
+  stage_current_hunk_and_wait(function()
+    return #(vim.b.currantgit_diff_hunks or {}) == 1
+  end)
+
+  goto_hunk(1)
+  stage_current_hunk_and_wait(function()
+    return git({ "diff", "--name-only" }, repo) == ""
+  end)
+
+  assert(git({ "diff", "--cached", "--name-only" }, repo) == "f.txt", "both hunks should now be staged")
+  local staged = git({ "cat-file", "blob", ":f.txt" }, repo)
+  assert(staged:find("TWO%-changed") and staged:find("EIGHTEEN%-changed"),
+    "both hunks' content must be present in the staged blob")
+  assert(#currantgit.errors() == 0, table.concat(currantgit.errors(), "\n"))
+
+  vim.cmd("cd " .. vim.fn.fnameescape(original_cwd))
+  vim.fn.delete(repo, "rf")
+end
+
+-- 13. Failed hunk application is atomic (audit continuation item 3): if a
+-- hunk's patch no longer applies (its context has already diverged from the
+-- index), `git apply --cached` must fail the whole patch and leave the index
+-- completely unchanged (`git help apply`: "For atomicity, git apply by
+-- default fails the whole patch and does not touch the working tree when
+-- some of the hunks do not apply") -- never a partial/corrupt index state,
+-- and CurrantGit must surface it as a clean error, not silently do nothing
+-- while claiming success.
+local function test_hunk_stage_atomic_on_conflict()
+  local repo = make_repo()
+  write_file(repo .. "/f.txt", "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n")
+  git({ "add", "f.txt" }, repo)
+  git({ "commit", "-q", "-m", "base" }, repo)
+  write_file(repo .. "/f.txt", "1\n2\n3\n4\nFIVE-changed\n6\n7\n8\n9\n10\n")
+
+  vim.cmd("cd " .. vim.fn.fnameescape(repo))
+  open_diff_and_wait({ "diff", "--", "f.txt" })
+  goto_hunk(1)
+  local hunk_item = vim.b.currantgit_line_items[vim.api.nvim_win_get_cursor(0)[1]]
+  assert(type(hunk_item) == "table" and hunk_item.kind == "hunk", "expected a hunk under the cursor")
+  local stale_patch = hunk_item.patch
+
+  -- Stage it for real once (this is the legitimate path), which makes the
+  -- index already equal the patch's "new" side.
+  stage_current_hunk_and_wait(function()
+    return git({ "diff", "--cached", "--name-only" }, repo) == "f.txt"
+      and git({ "diff", "--name-only" }, repo) == ""
+  end)
+
+  local index_before = git({ "cat-file", "blob", ":f.txt" }, repo)
+  -- Re-applying the SAME (now stale) patch text directly against the
+  -- current index must fail, and fail without mutating anything -- this
+  -- reproduces the "diff buffer went stale, user still presses the stage
+  -- key" race directly against real Git, independent of CurrantGit's own
+  -- reporting of the outcome.
+  local result = vim.system({ "git", "apply", "--cached", "--unidiff-zero" }, {
+    cwd = repo,
+    text = true,
+    stdin = stale_patch,
+  }):wait()
+  assert(result.code ~= 0, "a stale hunk patch must not apply cleanly a second time")
+  local index_after = git({ "cat-file", "blob", ":f.txt" }, repo)
+  assert(index_before == index_after,
+    "a failed git apply --cached must leave the index completely unchanged")
+
+  vim.cmd("cd " .. vim.fn.fnameescape(original_cwd))
+  vim.fn.delete(repo, "rf")
+end
+
+-- 14. A hunk's patch is pinned to the moment the diff was rendered, not to
+-- the live worktree (audit continuation item 3, "stale hunk"): `git apply
+-- --cached` only ever compares against the INDEX, never the worktree. If the
+-- worktree changes again after a diff is opened but before the index has
+-- been touched, staging the (now visually stale) hunk still succeeds --
+-- because its "old" side still matches the untouched index -- and stages
+-- exactly the patch that was visible when the diff was opened, not
+-- whatever is in the worktree now. This is correct, expected `git apply
+-- --cached` behavior (it is defined purely in terms of the index), not data
+-- loss: the worktree's further edit is left completely untouched. Recorded
+-- as a real, non-obvious behavior a user could be surprised by, not treated
+-- as a bug to "fix" by inventing staleness detection Git itself has no
+-- concept of.
+local function test_hunk_stage_pinned_to_render_time_not_worktree()
+  local repo = make_repo()
+  write_file(repo .. "/f.txt", "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n")
+  git({ "add", "f.txt" }, repo)
+  git({ "commit", "-q", "-m", "base" }, repo)
+  write_file(repo .. "/f.txt", "1\n2\n3\n4\nFIVE-changed\n6\n7\n8\n9\n10\n")
+
+  vim.cmd("cd " .. vim.fn.fnameescape(repo))
+  open_diff_and_wait({ "diff", "--", "f.txt" })
+  goto_hunk(1)
+
+  -- The worktree changes again after the diff was rendered, before the
+  -- index has been touched at all.
+  write_file(repo .. "/f.txt", "1\n2\n3\n4\nFIVE-changed-EXTERNALLY\n6\n7\n8\n9\n10\n")
+
+  stage_current_hunk_and_wait(function()
+    return git({ "diff", "--cached", "--name-only" }, repo) == "f.txt"
+  end)
+
+  local staged = git({ "cat-file", "blob", ":f.txt" }, repo)
+  assert(staged:find("FIVE%-changed\n") and not staged:find("EXTERNALLY"),
+    "the staged content should be exactly what the diff showed, not the later worktree edit")
+  assert(read_file(repo .. "/f.txt"):find("EXTERNALLY"),
+    "the later worktree edit must survive untouched in the working tree")
+  assert(#currantgit.errors() == 0, table.concat(currantgit.errors(), "\n"))
+
+  vim.cmd("cd " .. vim.fn.fnameescape(original_cwd))
+  vim.fn.delete(repo, "rf")
+end
+
 test_cwd_race()
 test_glob_pathspec()
 test_blame_multiline()
@@ -542,5 +753,9 @@ test_git_command_quoted_args()
 test_bare_repository_refuses_cleanly()
 test_detached_head()
 test_unborn_branch()
+test_hunk_stage_no_trailing_newline()
+test_hunk_stage_sequential_multi_hunk()
+test_hunk_stage_atomic_on_conflict()
+test_hunk_stage_pinned_to_render_time_not_worktree()
 assert(#currantgit.errors() == 0, table.concat(currantgit.errors(), "\n"))
 print("CurrantGit safety: ok")

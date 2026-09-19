@@ -67,6 +67,27 @@ these, see [`decisions/`](decisions/).
   explicit `cwd`; don't re-resolve it from ambient state. See
   [`decisions/0001`](decisions/0001-buffer-scoped-actions-reuse-captured-root.md).
 
+- **`git apply` is atomic by default.** `git help apply`: "For atomicity,
+  git apply by default fails the whole patch and does not touch the working
+  tree when some of the hunks do not apply." Verified this also holds for
+  `--cached` (index-only) application: a patch whose context no longer
+  matches the current index fails outright (non-zero exit, clear stderr) and
+  leaves the index byte-for-byte unchanged — never a partial application.
+  This only holds without `--reject`; CurrantGit's `stage_hunk`/`unstage_hunk`
+  never pass `--reject`, so this guarantee applies to them.
+
+- **`git apply --cached` only ever compares against the INDEX, never the
+  working tree.** A hunk's patch text is generated once, when a diff is
+  rendered. If the working tree changes again afterward but the index is
+  still untouched, staging that (now visually stale) hunk still succeeds —
+  it stages exactly what the diff showed at render time, not whatever the
+  worktree contains now. This is correct, well-defined `git apply --cached`
+  behavior, not data loss (the worktree's later edit is left completely
+  alone) — but it means a CurrantGit diff buffer can go stale relative to
+  the worktree without becoming stale relative to what it will actually
+  stage. See
+  [`decisions/0010`](decisions/0010-hunk-apply-edge-cases-verified-safe.md).
+
 - **A multi-file diff's *last* file having no `@@` hunk** (binary, pure
   mode/chmod change, 100%-similarity rename, empty file add/delete) is a
   normal, valid diff shape, not an edge case. A parser that assumes the
