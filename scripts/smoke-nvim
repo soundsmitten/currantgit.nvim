@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+fixture="$(mktemp -d "${TMPDIR:-/tmp}/currantgit-fixture.XXXXXX")"
+nvim_home="$(mktemp -d "${TMPDIR:-/tmp}/currantgit-nvim.XXXXXX")"
+trap 'rm -rf "$fixture" "$nvim_home"' EXIT
+
+git -C "$fixture" init -q
+git -C "$fixture" config user.name "CurrantGit Harness"
+git -C "$fixture" config user.email "harness@currantgit.invalid"
+printf 'one\ntwo\n' > "$fixture/tracked.txt"
+git -C "$fixture" add tracked.txt
+git -C "$fixture" commit -q -m "fixture base"
+printf 'one\nchanged\n' > "$fixture/tracked.txt"
+printf 'untracked\n' > "$fixture/untracked.txt"
+
+CURRANTGIT_ROOT="$repo_root" \
+  XDG_CONFIG_HOME="$nvim_home/config" \
+  XDG_DATA_HOME="$nvim_home/data" \
+  XDG_STATE_HOME="$nvim_home/state" \
+  XDG_CACHE_HOME="$nvim_home/cache" \
+  NVIM_APPNAME="${NVIM_APPNAME:-currantgit-smoke}" \
+  nvim --headless \
+    --noplugin \
+    -u "$repo_root/tests/minimal-init.lua" \
+    --cmd "cd $fixture" \
+    -c "luafile $repo_root/tests/smoke.lua"

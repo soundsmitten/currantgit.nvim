@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+required_files=(
+  AGENTS.md
+  README.md
+  CONTRIBUTING.md
+  docs/CurrantGit-PRD.md
+  docs/architecture.md
+  docs/development.md
+)
+
+for file in "${required_files[@]}"; do
+  if [[ ! -f "$file" ]]; then
+    printf 'missing required project contract: %s\n' "$file" >&2
+    exit 1
+  fi
+done
+
+git diff --check
+printf 'CurrantGit contract validation: ok\n'
