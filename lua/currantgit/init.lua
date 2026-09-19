@@ -124,13 +124,18 @@ end
 local function action_context(buffer)
   local root = vim.b[buffer].currantgit_root
   local function action(args, callback, input)
-    local result_root, error_message = repository_root()
-    if not result_root then
-      vim.notify("CurrantGit: " .. error_message, vim.log.levels.ERROR)
+    -- Deliberately reuse the repository root captured when this buffer was
+    -- populated, rather than re-deriving it from the live editor cwd. If we
+    -- re-resolved here, a `:cd` to a different repository between issuing
+    -- and confirming/completing a destructive action (e.g. the async gap
+    -- while `vim.ui.select` is awaiting a discard confirmation) would run
+    -- the mutation against the WRONG repository. See docs/audit for details.
+    if not root then
+      vim.notify("CurrantGit: unknown repository root for this buffer", vim.log.levels.ERROR)
       return
     end
     execute(vim.list_extend({ git_command() }, args), {
-      cwd = result_root,
+      cwd = root,
       text = true,
     }, function(result)
       schedule(function()
@@ -153,7 +158,7 @@ local function action_context(buffer)
     if vim.b[buffer].currantgit_title == "log" then
       open_log(vim.b[buffer].currantgit_log_args, root)
     else
-      open_status()
+      open_status(root)
     end
   end
   return {
@@ -163,32 +168,37 @@ local function action_context(buffer)
     open = function(item)
       navigation.update(0)
       if item.change_kind == "deleted" then
-        open_deleted(item)
+        open_deleted(item, root)
       else
         vim.cmd("edit " .. vim.fn.fnameescape(root .. "/" .. item.path))
         navigation.visit(0)
       end
     end,
     diff = function(item)
-      open_diff(item)
+      open_diff(item, root)
     end,
     blame = function(item)
-      open_blame(item.path)
+      open_blame(item.path, root)
     end,
     stage = function(item)
-      action({ "add", "--", item.path }, open_status)
+      -- The `:(literal)` pathspec magic prefix disables Git's default
+      -- wildcard/glob pathspec interpretation (see gitglossary(7),
+      -- PATHSPECS). Without it, a real filename containing `*`, `?`, or `[`
+      -- is treated as a glob and can silently apply this action to a
+      -- completely different, unrelated file.
+      action({ "add", "--", ":(literal)" .. item.path }, function() open_status(root) end)
     end,
     unstage = function(item)
-      action({ "restore", "--staged", "--", item.path }, open_status)
+      action({ "restore", "--staged", "--", ":(literal)" .. item.path }, function() open_status(root) end)
     end,
     stage_hunk = function(item)
       apply_hunk(item, { "apply", "--cached", "--unidiff-zero" }, function()
-        open_diff_args(vim.b[buffer].currantgit_diff_args)
+        open_diff_args(vim.b[buffer].currantgit_diff_args, root)
       end)
     end,
     unstage_hunk = function(item)
       apply_hunk(item, { "apply", "--cached", "--unidiff-zero", "--reverse" }, function()
-        open_diff_args(vim.b[buffer].currantgit_diff_args)
+        open_diff_args(vim.b[buffer].currantgit_diff_args, root)
       end)
     end,
     commit = function(item)
@@ -201,14 +211,15 @@ local function action_context(buffer)
         if choice ~= "Discard" then
           return
         end
-        action({ "restore", "--worktree", "--", item.path }, open_status)
+        action({ "restore", "--worktree", "--", ":(literal)" .. item.path }, function() open_status(root) end)
       end)
     end,
   }
 end
 
-open_deleted = function(item)
-  local root, error_message = repository_root()
+open_deleted = function(item, root)
+  local error_message
+  if not root then root, error_message = repository_root() end
   if not root then
     vim.notify("CurrantGit: " .. error_message, vim.log.levels.ERROR)
     return
@@ -246,8 +257,9 @@ open_deleted = function(item)
   end)
 end
 
-open_blame = function(path)
-  local root, error_message = repository_root()
+open_blame = function(path, root)
+  local error_message
+  if not root then root, error_message = repository_root() end
   if not root then
     vim.notify("CurrantGit: " .. error_message, vim.log.levels.ERROR)
     return
@@ -280,9 +292,10 @@ open_blame = function(path)
       vim.b[buffer].currantgit_title = "blame"
       vim.b[buffer].currantgit_blame_rows = rows
       vim.b[buffer].currantgit_blame_source = source_buffer
+      vim.b[buffer].currantgit_root = root
       vim.keymap.set("n", "<CR>", function()
         local row = vim.b[buffer].currantgit_blame_rows[vim.api.nvim_win_get_cursor(0)[1]]
-        if row then open_commit(row.commit) end
+        if row then open_commit(row.commit, vim.b[buffer].currantgit_root) end
       end, { buffer = buffer, silent = true, desc = "Open blamed commit" })
       vim.keymap.set("n", "gq", function() vim.cmd("close") end, {
         buffer = buffer,
@@ -486,8 +499,35 @@ open_log = function(args, root)
   end)
 end
 
-open_diff_args = function(args)
-  local root, error_message = repository_root()
+-- A hunk is only safe to stage/unstage when the diff it came from is
+-- actually a comparison against the live index: plain `git diff` (working
+-- tree vs index) or plain `git diff --cached`/`--staged` (index vs HEAD).
+-- `git diff <rev>`, `git diff <rev1> <rev2>`, or `git diff --cached <rev>`
+-- compare against an arbitrary revision instead, and `git apply --cached`
+-- on one of their hunks would mutate the index based on that unrelated
+-- comparison rather than the change the user actually asked to stage. Any
+-- argument beyond the bare `--cached`/`--staged` flag (or a trailing `--
+-- <pathspec>`) disqualifies staging entirely; refusing is the safe default.
+local function classify_diff_mode(args)
+  local before_pathspec = {}
+  for _, arg in ipairs(args) do
+    if arg == "--" then break end
+    if arg ~= "diff" then before_pathspec[#before_pathspec + 1] = arg end
+  end
+  if #before_pathspec == 0 then
+    return "working"
+  end
+  if #before_pathspec == 1 and (before_pathspec[1] == "--cached" or before_pathspec[1] == "--staged") then
+    return "staged"
+  end
+  return "historical"
+end
+
+open_diff_args = function(args, root)
+  local error_message
+  if not root then
+    root, error_message = repository_root()
+  end
   if not root then
     vim.notify("CurrantGit: " .. error_message, vim.log.levels.ERROR)
     return
@@ -501,7 +541,7 @@ open_diff_args = function(args)
         vim.notify("CurrantGit: " .. (result.stderr or "git diff failed"), vim.log.levels.ERROR)
         return
       end
-      local mode = vim.tbl_contains(args, "--cached") and "staged" or "working"
+      local mode = classify_diff_mode(args)
       local path
       for index, arg in ipairs(args) do
         if arg == "--" then path = args[index + 1] end
@@ -516,9 +556,20 @@ open_diff_args = function(args)
   end)
 end
 
-open_diff = function(item)
-  open_diff_args({ "diff", "--", item.path })
+open_diff = function(item, root)
+  -- CurrantGit-constructed pathspec: guard against Git's default pathspec
+  -- glob magic (gitglossary(7), PATHSPECS) so a literal filename containing
+  -- `*`, `?`, or `[` cannot unexpectedly match unrelated files.
+  open_diff_args({ "diff", "--", ":(literal)" .. item.path }, root)
 end
+
+-- Exactly the "unmerged" XY codes documented by `git help status` (Short
+-- Format table). Do not approximate this with a character class: some real,
+-- non-conflict codes (e.g. `AD`, staged-add then worktree-delete) are built
+-- from the same D/A/U letters and would otherwise be misclassified.
+local UNMERGED_STATUS_CODES = {
+  DD = true, AU = true, UD = true, UA = true, DU = true, AA = true, UU = true,
+}
 
 local function parse_status(stdout)
   local items = {}
@@ -537,24 +588,44 @@ local function parse_status(stdout)
     conflicts = { label = "Conflicts", items = {} },
   }
 
-  for line in (stdout .. "\n"):gmatch("(.-)\n") do
-    if vim.startswith(line, "## ") then
-      branch = line:sub(4)
-    elseif line ~= "" then
-      local status = line:sub(1, 2)
-      local path = vim.trim(line:sub(4))
-      local change_kind = status:find("R", 1, true) and "renamed"
+  -- `--porcelain=v1 -z` is used instead of the human `--short` format: NUL
+  -- separates every field so paths are never truncated, unquoted paths with
+  -- unicode/tab/space bytes come through raw, and rename/copy entries are an
+  -- unambiguous `to\0from\0` pair instead of one string containing " -> "
+  -- (see `git help status`, Porcelain Format Version 1).
+  local fields = vim.split(stdout or "", "\0", { plain = true })
+  local index = 1
+  if fields[index] and vim.startswith(fields[index], "## ") then
+    branch = fields[index]:sub(4)
+    index = index + 1
+  end
+
+  while index <= #fields do
+    local entry = fields[index]
+    index = index + 1
+    if entry ~= "" then
+      local status = entry:sub(1, 2)
+      local path = entry:sub(4)
+      local old_path
+      if status:sub(1, 1) == "R" or status:sub(1, 1) == "C"
+        or status:sub(2, 2) == "R" or status:sub(2, 2) == "C" then
+        old_path = fields[index]
+        index = index + 1
+      end
+      local change_kind = (status:sub(1, 1) == "R" or status:sub(2, 2) == "R") and "renamed"
+        or (status:sub(1, 1) == "C" or status:sub(2, 2) == "C") and "copied"
         or status:find("D", 1, true) and "deleted"
         or status:find("A", 1, true) and "added"
         or status:find("?", 1, true) and "untracked"
         or "modified"
       local is_untracked = status == "??"
-      local is_conflict = status:find("[DAU][DAU]", 1) ~= nil
+      local is_conflict = UNMERGED_STATUS_CODES[status] == true
       local item = {
         id = "change:" .. path,
         kind = "change",
         change_kind = is_conflict and "conflict" or change_kind,
         path = path,
+        old_path = old_path,
         status = status,
         capabilities = { "open", "diff", "stage" },
       }
@@ -598,7 +669,8 @@ local function parse_status(stdout)
       line_items[#lines] = node
       fold_levels[#lines] = ">1"
       for _, item in ipairs(section.items) do
-        lines[#lines + 1] = string.format("  %s  %s", ui.icons[item.change_kind] or item.status, item.path)
+        local label = item.old_path and (item.old_path .. " -> " .. item.path) or item.path
+        lines[#lines + 1] = string.format("  %s  %s", ui.icons[item.change_kind] or item.status, label)
         line_items[#lines] = item
         fold_levels[#lines] = 2
       end
@@ -615,14 +687,17 @@ local function parse_status(stdout)
   return lines, items, line_items, fold_levels, section_nodes
 end
 
-open_status = function()
-  local root, error_message = repository_root()
+open_status = function(root)
+  local error_message
+  if not root then
+    root, error_message = repository_root()
+  end
   if not root then
     vim.notify("CurrantGit: " .. error_message, vim.log.levels.ERROR)
     return
   end
 
-  execute({ git_command(), "status", "--short", "--branch" }, {
+  execute({ git_command(), "status", "--porcelain=v1", "-z", "--branch" }, {
     cwd = root,
     text = true,
   }, function(result)

@@ -4,7 +4,11 @@ function M.parse(stdout)
   local rows = {}
   local current
   for line in (stdout or ""):gmatch("(.-)\n") do
-    local commit, original, final = line:match("^([0-9a-f]+) (%d+) (%d+) %d+")
+    -- The trailing group-size field is only emitted on the first line of a
+    -- contiguous same-commit run (see `git help blame`, --line-porcelain);
+    -- it must not be required here or every subsequent line in that run is
+    -- silently dropped.
+    local commit, original, final = line:match("^([0-9a-f]+) (%d+) (%d+)")
     if commit then
       current = {
         commit = commit,

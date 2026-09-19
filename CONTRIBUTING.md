@@ -56,11 +56,16 @@ agent is not the subject of the project. The tool is.
 6. Create an isolated branch, normally `codex/<short-description>`.
 7. Implement the smallest complete vertical slice.
 8. Add or update tests, fixtures, and documentation with the behavior.
-9. Run the requested development flow, including builds, tests, and Neovim
+9. If the slice touches repository identity, revisions, pathspecs, patches, or
+   index/worktree state, run it through the adversarial validation phase in
+   [`docs/development.md`](docs/development.md) before calling it done —
+   preferably with a different reviewing context than the one that
+   implemented it.
+10. Run the requested development flow, including builds, tests, and Neovim
    launches when authorized.
-10. Review the diff, report validation honestly, and commit with a concise
+11. Review the diff, report validation honestly, and commit with a concise
    imperative message.
-11. Push the branch and open or update the review handoff when remote access and
+12. Push the branch and open or update the review handoff when remote access and
    credentials are available.
 
 Once approved, the agent should carry the accepted work through without
@@ -76,6 +81,10 @@ materially changes scope, or a failed check that needs user input.
 - a clear distinction between automated, manual, and unverified checks
 - an iteration note or equivalent issue evidence for meaningful slices
 - a reviewable branch and commit history
+- for anything touching repository identity, revisions, pathspecs, patches, or
+  index/worktree state, evidence that the adversarial validation phase in
+  [`docs/development.md`](docs/development.md) actually happened, not just
+  that the harness stayed green
 
 Do not claim a feature is complete because its design is documented. Do not
 hide runtime gaps behind static checks.
