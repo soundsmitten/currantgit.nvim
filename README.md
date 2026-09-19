@@ -19,6 +19,15 @@ through the repository, the harness, and the review trail.
 
 > Pope -> Fugitive -> Vatican Git aka CurrantGit
 
+## Integrity first
+
+CurrantGit is meant to be rock solid in a real worktree. Mutations are
+explicit, safety boundaries are visible, and failures should leave repository
+state unchanged. The project favors bounded blast radius, reversible actions,
+and honest validation over clever automation. Here be dragons: dangerous or
+still-evolving edges are named, isolated, confirmed, and tested before they
+become defaults.
+
 ## Status
 
 This repository is in the design and bootstrap phase. The first executable

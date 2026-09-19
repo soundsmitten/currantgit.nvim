@@ -96,11 +96,44 @@ assert(vim.b.currantgit_line_items[hunk_line].kind == "hunk", "diff hunk row sho
 vim.cmd("normal! zc")
 assert(vim.fn.foldclosed(hunk_line) == hunk_line, "diff hunk should collapse with native fold commands")
 vim.cmd("normal! zo")
+local hunk_stage_mapping = vim.fn.maparg("s", "n", false, true)
+assert(hunk_stage_mapping.callback, "hunk stage mapping was not registered")
+hunk_stage_mapping.callback()
+vim.wait(5000, function() return #vim.b.currantgit_diff_hunks == 0 end)
+assert(#vim.b.currantgit_diff_hunks == 0, "staging a hunk should reconcile the working diff")
+vim.cmd("Git diff --cached")
+vim.wait(5000, function() return vim.bo.filetype == "diff" and #vim.b.currantgit_diff_hunks >= 1 end)
+for line, item in pairs(vim.b.currantgit_line_items) do
+  if type(item) == "table" and item.kind == "hunk" and item.path == "tracked.txt" then
+    vim.api.nvim_win_set_cursor(0, { line, 0 })
+    break
+  end
+end
+local hunk_unstage_mapping = vim.fn.maparg("u", "n", false, true)
+assert(hunk_unstage_mapping.callback, "hunk unstage mapping was not registered")
+hunk_unstage_mapping.callback()
+vim.wait(5000, function()
+  for _, hunk in ipairs(vim.b.currantgit_diff_hunks or {}) do
+    if hunk.path == "tracked.txt" then return false end
+  end
+  return true
+end)
+for _, hunk in ipairs(vim.b.currantgit_diff_hunks or {}) do
+  assert(hunk.path ~= "tracked.txt", "unstaging a hunk should remove that path from the staged diff")
+end
+local staged_diff_buffer = vim.api.nvim_get_current_buf()
+vim.cmd("Git status")
+vim.wait(5000, function() return vim.bo.filetype == "currantgit" and vim.b.currantgit_title == "status" end)
 local diff_back_mapping = vim.fn.maparg("<C-O>", "n", false, true)
 assert(diff_back_mapping.callback, "diff back mapping was not registered")
 diff_back_mapping.callback()
+vim.wait(2000, function() return vim.api.nvim_get_current_buf() == staged_diff_buffer end)
+assert(vim.api.nvim_get_current_buf() == staged_diff_buffer, "diff back navigation did not return to the previous view")
+local diff_forward_mapping = vim.fn.maparg("<C-S-I>", "n", false, true)
+assert(diff_forward_mapping.callback, "diff forward mapping was not registered")
+diff_forward_mapping.callback()
 vim.wait(2000, function() return vim.api.nvim_get_current_buf() == status_buffer end)
-assert(vim.api.nvim_get_current_buf() == status_buffer, "diff back navigation did not return to status")
+assert(vim.api.nvim_get_current_buf() == status_buffer, "diff forward navigation did not return to status")
 
 local refresh_mapping = vim.fn.maparg("r", "n", false, true)
 assert(refresh_mapping.callback, "refresh mapping was not registered")
