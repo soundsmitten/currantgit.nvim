@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposal — awaiting approval before becoming implementation work.
+Approved — implementation in progress.
 
 I’m wondering if the next CurrantGit move should be making status items truly
 actionable. Every meaningful thing in the surface—sections, changes, hunks,

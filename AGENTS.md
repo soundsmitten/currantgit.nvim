@@ -75,6 +75,8 @@ Update this map when a directory becomes real.
 11. Follow [`docs/development.md`](docs/development.md): stage the work,
     capture iteration evidence, and record decisions that constrain future
     agents.
+12. For every user-facing mapping or action, add a clean headless interaction
+    assertion. Command coverage alone is not interaction coverage.
 
 ## Validation
 

@@ -122,6 +122,10 @@ project contract, creates a temporary Git fixture, launches clean Neovim, and
 asserts the `:Git` status surface and semantic change items. Extend that loop as
 new slices land; do not replace it with an opaque all-in-one command.
 
+The harness must exercise mapped actions, not only the functions beneath them.
+Async callback errors are collected and asserted as test failures. A green
+command-level test is insufficient if pressing the actual key can still fail.
+
 Configuration follows the same discipline: defaults should be useful, options
 should be few, and every documented option should affect observable behavior.
 Do not expose an option merely to avoid choosing a default.

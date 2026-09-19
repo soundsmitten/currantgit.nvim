@@ -5,7 +5,7 @@ M.defaults = {
     command = "git",
   },
   ui = {
-    title = "CurrantGit",
+    title = nil,
     show_clean = true,
     show_branch = true,
     show_counts = true,
@@ -25,8 +25,8 @@ local function validate(config)
   if type(config.git.command) ~= "string" or config.git.command == "" then
     error("CurrantGit: git.command must be a non-empty string")
   end
-  if type(config.ui.title) ~= "string" or config.ui.title == "" then
-    error("CurrantGit: ui.title must be a non-empty string")
+  if config.ui.title ~= nil and (type(config.ui.title) ~= "string" or config.ui.title == "") then
+    error("CurrantGit: ui.title must be nil or a non-empty string")
   end
   for _, key in ipairs({ "show_clean", "show_branch", "show_counts" }) do
     if type(config.ui[key]) ~= "boolean" then
