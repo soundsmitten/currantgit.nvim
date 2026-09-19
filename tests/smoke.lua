@@ -12,6 +12,17 @@ local defaults = currantgit.get_config()
 assert(defaults.ui.title == nil, "status headers should default to the repository name")
 assert(defaults.ui.icons.modified == "M", "configuration icon defaults are not loaded")
 
+local rpc = currantgit.rpc({
+  capabilities = { "action.dispatch", "repository.snapshot" },
+  handlers = { ping = function(params) return params.value end },
+})
+local capabilities = rpc:request({ id = 1, method = "rpc.capabilities" })
+assert(capabilities.result.version == 1, "RPC capabilities should expose the protocol version")
+local ping = rpc:request({ id = 2, method = "ping", params = { value = "pong" } })
+assert(ping.result.value == "pong" and ping.result.revision == 1, "RPC handler response is malformed")
+local missing = rpc:request({ id = 3, method = "nope" })
+assert(missing.error.code == "method_not_found", "RPC should return structured unknown-method errors")
+
 local function assert_no_async_errors()
   assert(#currantgit.errors() == 0, table.concat(currantgit.errors(), "\n"))
 end

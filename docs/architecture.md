@@ -384,6 +384,12 @@ of merely making internals public.
 
 ## RPC boundary
 
+The first implemented transport is an in-process adapter returned by
+`require("currantgit").rpc()`. It provides versioned capability discovery,
+request IDs, structured errors, revisioned results, and event subscribers.
+External transports remain future adapters; the in-process seam is deliberately
+small enough to test without starting a daemon.
+
 RPC exposes the same core capabilities to another process or UI. It is not an
 arbitrary Lua bridge and it is not a shell proxy.
 

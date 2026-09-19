@@ -8,6 +8,7 @@ STATUS                                                   *currantgit-status*
 CONFIGURATION                                       *currantgit-configuration*
 NAVIGATION                                           *currantgit-navigation*
 ACTIONS                                                     *currantgit-actions*
+RPC                                                            *currantgit-rpc*
 
 ===============================================================================
 COMMANDS                                                        *currantgit-commands*
@@ -109,5 +110,11 @@ future WhichKey integration are projections of the same action metadata.
 An action may be available for a change, hunk, commit, blame line, person, or
 another item kind. Extensions should target stable item IDs and capabilities,
 not rendered line numbers.
+
+`require('currantgit').rpc()` creates an in-process protocol adapter. Requests
+have IDs and methods, responses carry structured errors or revisioned results,
+and `rpc.capabilities` reports the negotiated version and capabilities.
+Handlers are explicitly registered; the adapter does not evaluate arbitrary
+Lua or shell text. Event subscribers receive revisioned event envelopes.
 
  vim:tw=78:ts=8:sw=8:et:ft=help:norl:
