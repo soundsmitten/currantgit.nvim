@@ -67,7 +67,8 @@ for a path that no longer exists.
 
 The `b` action opens a blame companion split for the selected file. The source
 buffer remains available beside the read-only attribution buffer. `gq` closes
-the blame companion and returns to the source buffer.
+the blame companion and returns to the source buffer. `<CR>` on an attribution
+row opens its commit view; Ctrl-O returns to blame.
 
 `:GitActivity` shows the bounded command ledger: argv, duration, exit code,
 and summarized output. It is an inspection surface, not a replacement for

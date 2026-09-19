@@ -17,7 +17,7 @@ validation, and documentation. The experiment is deliberately serious: the
 work is allowed to move quickly, but every claim still has to earn its way
 through the repository, the harness, and the review trail.
 
-> Vatican Git — the Holy Git
+> Pope -> Fugitive -> Vatican Git aka CurrantGit
 
 ## Status
 
