@@ -61,6 +61,8 @@ Both projections are contextual to the item under the cursor.
 
 The diff action opens a read-only diff surface. Hunk headers are native fold
 roots, so |fold-commands| can collapse or reopen each hunk.
+Each hunk is also a stable semantic item with source ranges and collapse,
+stage, and unstage capabilities for later hunk actions.
 
 On a deleted item, <CR> opens the last available Git revision in a read-only
 `currantgit://deleted/...` buffer. CurrantGit does not create an empty buffer

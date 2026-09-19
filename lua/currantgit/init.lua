@@ -374,9 +374,10 @@ open_diff_args = function(args)
         vim.notify("CurrantGit: " .. (result.stderr or "git diff failed"), vim.log.levels.ERROR)
         return
       end
-      local lines, fold_levels = diff.parse(result.stdout or "")
+      local lines, fold_levels, line_items, hunks = diff.parse(result.stdout or "")
       navigation.update(0)
-      set_buffer(lines, {}, "diff", {}, root, fold_levels)
+      set_buffer(lines, hunks, "diff", line_items, root, fold_levels)
+      vim.b.currantgit_diff_hunks = hunks
       navigation.visit(0)
     end)
   end)
