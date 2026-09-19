@@ -68,7 +68,7 @@ local function update_discovery(buffer)
     return
   end
   local item = current_item(buffer)
-  local available = actions.available(item, { buffer = buffer })
+  local available = actions.discovery(item, { buffer = buffer })
   local labels = {}
   for _, action in ipairs(available) do
     if action.key then
@@ -537,6 +537,16 @@ end
 
 function M.errors()
   return state.errors
+end
+
+function M.discovery(buffer)
+  buffer = buffer or vim.api.nvim_get_current_buf()
+  return actions.discovery(current_item(buffer), { buffer = buffer })
+end
+
+function M.which_key(buffer)
+  buffer = buffer or vim.api.nvim_get_current_buf()
+  return actions.which_key(current_item(buffer), action_context(buffer))
 end
 
 function M.foldexpr(line)

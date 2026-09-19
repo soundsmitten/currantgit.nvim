@@ -42,6 +42,36 @@ function M.available(item, context)
   return result
 end
 
+function M.discovery(item, context)
+  local result = {}
+  for _, action in ipairs(M.available(item, context)) do
+    if action.key then
+      result[#result + 1] = {
+        id = action.id,
+        key = action.key,
+        label = action.label,
+        desc = action.desc or action.label,
+      }
+    end
+  end
+  return result
+end
+
+function M.which_key(item, context)
+  local result = {}
+  for _, action in ipairs(M.available(item, context)) do
+    if action.key then
+      result[action.key] = {
+        desc = action.desc or action.label,
+        action = function()
+          return M.dispatch(action.id, context, item)
+        end,
+      }
+    end
+  end
+  return result
+end
+
 function M.dispatch(id, context, item)
   local action = registry[id]
   assert(action, "CurrantGit action not found: " .. id)
