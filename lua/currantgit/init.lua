@@ -4,6 +4,7 @@ local actions = require("currantgit.actions")
 local blame = require("currantgit.blame")
 local diff = require("currantgit.diff")
 local navigation = require("currantgit.navigation")
+local rpc = require("currantgit.rpc")
 
 local state = {
   configured = false,
@@ -569,6 +570,10 @@ end
 
 function M.command_log()
   return vim.deepcopy(state.command_log)
+end
+
+function M.rpc(options)
+  return rpc.new(options)
 end
 
 function M.setup(opts)
