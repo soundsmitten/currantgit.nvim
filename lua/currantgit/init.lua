@@ -12,6 +12,7 @@ local state = {
 
 local open_status
 local open_diff
+local open_deleted
 
 local function schedule(callback)
   vim.schedule(function()
@@ -109,8 +110,12 @@ local function action_context(buffer)
     end,
     open = function(item)
       navigation.update(0)
-      vim.cmd("edit " .. vim.fn.fnameescape(root .. "/" .. item.path))
-      navigation.visit(0)
+      if item.change_kind == "deleted" then
+        open_deleted(item)
+      else
+        vim.cmd("edit " .. vim.fn.fnameescape(root .. "/" .. item.path))
+        navigation.visit(0)
+      end
     end,
     diff = function(item)
       open_diff(item)
@@ -132,6 +137,45 @@ local function action_context(buffer)
       end)
     end,
   }
+end
+
+open_deleted = function(item)
+  local root, error_message = repository_root()
+  if not root then
+    vim.notify("CurrantGit: " .. error_message, vim.log.levels.ERROR)
+    return
+  end
+  local revision = item.status:sub(1, 1) == "D" and "HEAD" or ":"
+  local target = revision == ":" and (revision .. item.path) or (revision .. ":" .. item.path)
+  vim.system({ git_command(), "show", target }, {
+    cwd = root,
+    text = true,
+  }, function(result)
+    schedule(function()
+      if result.code ~= 0 then
+        vim.notify("CurrantGit: " .. (result.stderr or "could not read deleted file"), vim.log.levels.ERROR)
+        return
+      end
+      local name = "currantgit://deleted/" .. item.path
+      local buffer = vim.fn.bufnr(name)
+      if buffer < 0 or not vim.api.nvim_buf_is_valid(buffer) then
+        buffer = vim.api.nvim_create_buf(false, true)
+        vim.api.nvim_buf_set_name(buffer, name)
+      end
+      vim.api.nvim_set_current_buf(buffer)
+      set_modifiable(buffer, function()
+        vim.api.nvim_buf_set_lines(buffer, 0, -1, false, vim.split(result.stdout or "", "\n", { plain = true }))
+      end)
+      vim.bo[buffer].buftype = "nofile"
+      vim.bo[buffer].bufhidden = "hide"
+      vim.bo[buffer].modifiable = false
+      vim.bo[buffer].readonly = true
+      vim.bo[buffer].filetype = vim.filetype.match({ filename = item.path }) or ""
+      vim.b[buffer].currantgit_title = "deleted"
+      vim.b[buffer].currantgit_item = item
+      navigation.visit(0)
+    end)
+  end)
 end
 
 local function dispatch_current(buffer, id)
