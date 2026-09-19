@@ -1,10 +1,13 @@
 local M = {}
 local config = require("currantgit.config")
+local actions = require("currantgit.actions")
 
 local state = {
   configured = false,
   opts = {},
 }
+
+local open_status
 
 local function split_args(args)
   if args == "" then
@@ -29,7 +32,83 @@ local function repository_root()
   return vim.trim(result.stdout)
 end
 
-local function set_buffer(lines, items, title)
+local function set_modifiable(buffer, callback)
+  local was_modifiable = vim.bo[buffer].modifiable
+  local was_readonly = vim.bo[buffer].readonly
+  vim.bo[buffer].readonly = false
+  vim.bo[buffer].modifiable = true
+  callback()
+  vim.bo[buffer].modifiable = was_modifiable
+  vim.bo[buffer].readonly = was_readonly
+end
+
+local function current_item(buffer)
+  local line = vim.api.nvim_win_get_cursor(0)[1]
+  local item = vim.b[buffer].currantgit_line_items[line]
+  return type(item) == "table" and item or nil
+end
+
+local function update_discovery(buffer)
+  if not vim.api.nvim_buf_is_valid(buffer) or vim.bo[buffer].filetype ~= "currantgit" then
+    return
+  end
+  local item = current_item(buffer)
+  local available = actions.available(item, { buffer = buffer })
+  local labels = {}
+  for _, action in ipairs(available) do
+    if action.key then
+      labels[#labels + 1] = action.key .. " " .. action.label
+    end
+  end
+  local line = #labels > 0 and "Actions: " .. table.concat(labels, "   ") or "Actions: r refresh   g? help"
+  set_modifiable(buffer, function()
+    vim.api.nvim_buf_set_lines(buffer, -2, -1, false, { line })
+  end)
+end
+
+local function action_context(buffer)
+  local root = vim.b[buffer].currantgit_root
+  return {
+    buffer = buffer,
+    root = root,
+    refresh = function()
+      open_status()
+    end,
+    open = function(item)
+      vim.cmd("edit " .. vim.fn.fnameescape(root .. "/" .. item.path))
+    end,
+    diff = function(item)
+      M.git({ "diff", "--", item.path })
+    end,
+  }
+end
+
+local function dispatch_current(buffer, id)
+  local item = current_item(buffer)
+  local ok, error_message = actions.dispatch(id, action_context(buffer), item)
+  if not ok and error_message then
+    vim.notify("CurrantGit: " .. error_message, vim.log.levels.WARN)
+  end
+end
+
+local function attach_status(buffer)
+  local map = function(mode, lhs, rhs)
+    vim.keymap.set(mode, lhs, rhs, { buffer = buffer, silent = true, desc = "CurrantGit" })
+  end
+  map("n", "<CR>", function() dispatch_current(buffer, "item.open") end)
+  map("n", "d", function() dispatch_current(buffer, "item.diff") end)
+  map("n", "r", function() dispatch_current(buffer, "surface.refresh") end)
+  map("n", "g?", function() dispatch_current(buffer, "surface.help") end)
+  vim.api.nvim_create_autocmd("CursorMoved", {
+    buffer = buffer,
+    callback = function()
+      update_discovery(buffer)
+    end,
+  })
+  update_discovery(buffer)
+end
+
+local function set_buffer(lines, items, title, line_items, root)
   local buffer = vim.api.nvim_create_buf(false, true)
   vim.api.nvim_buf_set_name(buffer, "currantgit://" .. title)
   vim.api.nvim_set_current_buf(buffer)
@@ -41,7 +120,12 @@ local function set_buffer(lines, items, title)
   vim.bo[buffer].modifiable = false
   vim.bo[buffer].readonly = true
   vim.b[buffer].currantgit_items = items
+  vim.b[buffer].currantgit_line_items = line_items or {}
+  vim.b[buffer].currantgit_root = root
   vim.b[buffer].currantgit_title = title
+  if title == "status" then
+    attach_status(buffer)
+  end
   return buffer
 end
 
@@ -51,6 +135,7 @@ local function parse_status(stdout)
   local lines = { ui.title .. "  " .. vim.fn.fnamemodify(vim.fn.getcwd(), ":t") }
   local branch = ""
   local changes = {}
+  local line_items = {}
 
   for line in (stdout .. "\n"):gmatch("(.-)\n") do
     if vim.startswith(line, "## ") then
@@ -82,14 +167,19 @@ local function parse_status(stdout)
   lines[#lines + 1] = ""
   lines[#lines + 1] = ui.show_counts and string.format("Changes (%d)", #items) or "Changes"
   if #changes > 0 then
-    vim.list_extend(lines, changes)
+    for index, change in ipairs(changes) do
+      lines[#lines + 1] = change
+      line_items[#lines] = items[index]
+    end
   elseif ui.show_clean then
     lines[#lines + 1] = "  clean"
   end
-  return lines, items
+  lines[#lines + 1] = ""
+  lines[#lines + 1] = ""
+  return lines, items, line_items
 end
 
-local function open_status()
+open_status = function()
   local root, error_message = repository_root()
   if not root then
     vim.notify("CurrantGit: " .. error_message, vim.log.levels.ERROR)
@@ -105,8 +195,8 @@ local function open_status()
         vim.notify("CurrantGit: " .. (result.stderr or "git status failed"), vim.log.levels.ERROR)
         return
       end
-      local lines, items = parse_status(result.stdout or "")
-      set_buffer(lines, items, "status")
+      local lines, items, line_items = parse_status(result.stdout or "")
+      set_buffer(lines, items, "status", line_items, root)
     end)
   end)
 end
@@ -145,6 +235,45 @@ function M.setup(opts)
   if state.configured then
     return M
   end
+
+  actions.register({
+    id = "surface.refresh",
+    label = "refresh",
+    key = "r",
+    run = function(context)
+      context.refresh()
+      return true
+    end,
+  })
+  actions.register({
+    id = "surface.help",
+    label = "help",
+    key = "g?",
+    run = function()
+      vim.notify("CurrantGit: <CR> open   d diff   r refresh", vim.log.levels.INFO)
+      return true
+    end,
+  })
+  actions.register({
+    id = "item.open",
+    label = "open",
+    key = "<CR>",
+    applies_to = { "change" },
+    run = function(context, item)
+      context.open(item)
+      return true
+    end,
+  })
+  actions.register({
+    id = "item.diff",
+    label = "diff",
+    key = "d",
+    applies_to = { "change" },
+    run = function(context, item)
+      context.diff(item)
+      return true
+    end,
+  })
 
   vim.api.nvim_create_user_command("Git", function(command)
     M.git(split_args(command.args))

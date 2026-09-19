@@ -24,6 +24,17 @@ assert_contains(lines, "Changes")
 assert(vim.b.currantgit_items, "status surface did not expose semantic items")
 assert(#vim.b.currantgit_items >= 2, "fixture should expose modified and untracked items")
 
+vim.fn.search("tracked.txt")
+local actions = require("currantgit.actions").available(vim.b.currantgit_items[1], { buffer = 0 })
+local action_ids = {}
+for _, action in ipairs(actions) do
+  action_ids[action.id] = true
+end
+assert(action_ids["item.open"], "change item is missing the open action")
+assert(action_ids["item.diff"], "change item is missing the diff action")
+assert(action_ids["surface.refresh"], "surface is missing the refresh action")
+assert_contains(vim.api.nvim_buf_get_lines(0, -2, -1, false), "Actions:")
+
 vim.cmd("Git status")
 vim.wait(5000, function()
   return vim.bo.filetype == "currantgit" and vim.b.currantgit_title == "status"
