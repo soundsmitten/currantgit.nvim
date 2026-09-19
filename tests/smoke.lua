@@ -37,6 +37,21 @@ local function goto_item(path)
   error("could not find status item: " .. path)
 end
 
+-- A refresh that reuses the current buffer can leave `filetype`/
+-- `currantgit_title` already satisfied from the *previous* render, so
+-- waiting on those flags alone can return before the new async status
+-- fetch actually finishes. Track the buffer's changedtick (or a genuine
+-- buffer switch) so the wait only succeeds once the refresh has landed.
+local function wait_for_status_refresh(trigger)
+  local buffer = vim.api.nvim_get_current_buf()
+  local tick = vim.api.nvim_buf_get_changedtick(buffer)
+  trigger()
+  assert(vim.wait(5000, function()
+    return vim.bo.filetype == "currantgit" and vim.b.currantgit_title == "status"
+      and (vim.api.nvim_get_current_buf() ~= buffer or vim.api.nvim_buf_get_changedtick(buffer) > tick)
+  end, 10), "status refresh did not settle")
+end
+
 vim.cmd("Git")
 vim.wait(5000, function()
   return vim.bo.filetype == "currantgit"
@@ -137,10 +152,7 @@ assert(vim.api.nvim_get_current_buf() == status_buffer, "diff forward navigation
 
 local refresh_mapping = vim.fn.maparg("r", "n", false, true)
 assert(refresh_mapping.callback, "refresh mapping was not registered")
-refresh_mapping.callback()
-vim.wait(5000, function()
-  return vim.api.nvim_get_current_buf() == status_buffer and vim.b.currantgit_title == "status"
-end)
+wait_for_status_refresh(function() refresh_mapping.callback() end)
 assert_no_async_errors()
 assert(vim.api.nvim_get_current_buf() == status_buffer, "refresh created a duplicate status buffer")
 
@@ -266,10 +278,7 @@ for _, item in ipairs(vim.b.currantgit_items) do
 end
 assert(not discarded_item, "confirmed discard should remove the item from status")
 
-vim.cmd("Git status")
-vim.wait(5000, function()
-  return vim.bo.filetype == "currantgit" and vim.b.currantgit_title == "status"
-end)
+wait_for_status_refresh(function() vim.cmd("Git status") end)
 goto_item("deleted.txt")
 local deleted_open_mapping = vim.fn.maparg("<CR>", "n", false, true)
 assert(deleted_open_mapping.callback, "deleted-file open mapping was not registered")
@@ -315,5 +324,9 @@ blame_close_mapping.callback()
 vim.wait(2000, function() return #vim.api.nvim_list_wins() == 1 end)
 assert(#vim.api.nvim_list_wins() == 1, "gq should close blame and return to the source")
 
+dofile(vim.env.CURRANTGIT_ROOT .. "/tests/log.lua")
+assert_no_async_errors()
+dofile(vim.env.CURRANTGIT_ROOT .. "/tests/safety.lua")
+assert_no_async_errors()
 print("CurrantGit smoke: ok")
 vim.cmd("qa!")

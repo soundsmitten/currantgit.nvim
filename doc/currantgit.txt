@@ -5,6 +5,7 @@ CONTENTS                                                     *currantgit-content
 
 COMMANDS                                                        |:Git|
 STATUS                                                   *currantgit-status*
+LOG                                                         |currantgit-log|
 CONFIGURATION                                       *currantgit-configuration*
 NAVIGATION                                           *currantgit-navigation*
 ACTIONS                                                     *currantgit-actions*
@@ -18,6 +19,7 @@ COMMANDS                                                        *currantgit-comm
                         for the current working directory.
 
 :Git status               Open or refresh the status surface.
+:Git log                  Open the read-only commit log (latest 50 commits).
 :GitActivity              Open the optional read-only Git command activity log.
 :Git {args}               Run an arbitrary Git command and display its output
                           in a CurrantGit command surface.
@@ -81,6 +83,52 @@ row opens its commit view; Ctrl-O returns to blame.
 `:GitActivity` shows the bounded command ledger: argv, duration, exit code,
 and summarized output. It is an inspection surface, not a replacement for
 the status projection.
+
+===============================================================================
+LOG                                                             *currantgit-log*
+
+:Git log projects commits into a read-only, searchable, yankable buffer. Each
+row shows a short object ID, author date, author, and subject. The semantic
+commit item retains the full object ID, parents, author name/email, ISO author
+date, subject, repository, and stable `commit:<full-object-id>` identity.
+Items are exposed through `b:currantgit_items`; `b:currantgit_line_items` maps
+the visible rows to those items. Rendered text is never an action target.
+
+<CR>                    Open the selected commit's stat and patch using the
+                        shared commit view (action ID: `commit.open`).
+r                       Refresh this log with its original arguments and
+                        repository. Retain the selected commit when present.
+g?                      Show actions available at the cursor.
+
+Ctrl-O returns from a commit to the log and restores the cursor. Ctrl-Shift-I
+moves forward again. The discovery line, public discovery()/which_key()
+projections, and g? use the action registry. Headers and empty results have no
+commit action. Log actions do not stage, reset, or otherwise mutate Git state.
+
+The default limit is 50 commits. Selection arguments supported by this surface:
+
+  -n N, -nN, -N, --max-count N, --max-count=N
+  --all, --reverse, --first-parent, --no-merges, --merges
+  --skip=N, --since=VALUE, --until=VALUE, --author=VALUE, --grep=VALUE
+  revisions/ranges and -- followed by repository-root-relative paths
+
+An explicit count overrides the default. Examples: >
+  :Git log -n 10
+  :Git log HEAD~5..HEAD
+  :Git log -- lua/currantgit/init.lua
+<
+Output options such as --graph, --oneline, --format, and --patch, and any other
+unsupported option, use the ordinary command surface with the original Git
+arguments. They are not silently rewritten into semantic rows. This bootstrap
+command still splits arguments on whitespace; quoted values containing spaces
+are not supported. Pass a Lua argv table to require('currantgit').git({...})
+when an argument contains spaces.
+
+A successful empty selection displays "no commits". Git errors (including
+unborn HEAD for a plain log) are reported without replacing the current view.
+Log responses are ignored if superseded or if the user has left the originating
+window/buffer before completion. One log buffer is reused; this slice does not
+provide pagination, graph lanes, revision editing, or independent log tabs.
 
 ===============================================================================
 CONFIGURATION                                           *currantgit-configuration*

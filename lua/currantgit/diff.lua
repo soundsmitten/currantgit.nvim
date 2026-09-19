@@ -39,7 +39,10 @@ function M.parse(stdout, options)
         new_start = tonumber(new_start),
         new_count = tonumber(new_count ~= "" and new_count or "1"),
         start_line = line,
-        mode = options.mode or "working",
+        -- Do not default to "working": a caller that forgot to classify
+        -- the diff should get a hunk that offers no stage/unstage action,
+        -- not one that silently claims to represent the live index.
+        mode = options.mode or "historical",
         path = path,
         header_lines = hunk_header,
         capabilities = { "collapse", "stage", "unstage" },
@@ -55,7 +58,9 @@ function M.parse(stdout, options)
     end
   end
   if has_hunk then
-    current_hunk.end_line = #lines
+    if current_hunk then
+      current_hunk.end_line = #lines
+    end
     for _, hunk in ipairs(hunks) do
       local patch_lines = vim.deepcopy(hunk.header_lines)
       for line = hunk.start_line, #lines do

@@ -34,6 +34,9 @@ building it in advance. Personality is welcome; ambiguity is not.
 docs/CurrantGit-PRD.md  product contract and phased plan
 docs/architecture.md    architecture and extension contracts
 docs/development.md     staged development and anti-drift protocol
+docs/gotchas.md         empirical Git/Neovim landmines, verified not assumed
+docs/decisions/          numbered ADRs for decisions that constrain later work
+docs/iterations/         per-slice outcome notes
 docs/issues/             local issue proposals and discussion drafts
 README.md                public project overview
 CONTRIBUTING.md          issue-to-agent contribution flow
@@ -48,37 +51,58 @@ Update this map when a directory becomes real.
 
 ## Working rules
 
-1. Inspect the current files and `git status` before editing.
-2. Keep the core independent of a particular buffer UI or transport.
-3. Put Git process behavior behind one executor; do not shell out ad hoc from
+1. Before relying on Git or Neovim behavior you didn't just verify, pull the
+   current official Git and Neovim documentation for the exact commands,
+   formats, and APIs involved and read them. Memory and training-data
+   assumptions about Git output formats and Neovim APIs are frequently
+   confident and wrong, and this codebase has already shipped real
+   correctness bugs that a few minutes with the actual docs would have
+   caught. Verify, don't assume. Check [`docs/gotchas.md`](docs/gotchas.md)
+   first — it's a running list of exactly this kind of assumption that
+   turned out to be wrong.
+2. Inspect the current files and `git status` before editing.
+3. Keep the core independent of a particular buffer UI or transport.
+4. Put Git process behavior behind one executor; do not shell out ad hoc from
    actions, renderers, or RPC handlers.
-4. Use stable IDs for model nodes so folds, cursor context, and inline-diff
+5. Use stable IDs for model nodes so folds, cursor context, and inline-diff
    state survive refreshes.
-5. Treat every meaningful Git concept as a domain item and nodes as its
+6. Treat every meaningful Git concept as a domain item and nodes as its
    projection. Changes, additions, deletions, renames, conflicts, status
    sections, people, and remotes are all eligible items. Custom actions target
    stable item IDs and semantic context, never rendered line numbers.
-6. Preserve buffer-native semantics: normal motion, search, yank, visual
+7. Preserve buffer-native semantics: normal motion, search, yank, visual
    selection, collapsible regions, text objects, and window commands should
    keep working. A surface may be virtual or read-only, but it must support the
    interactions users expect from a buffer. Add metadata with highlights,
    extmarks, signs, virtual text, and buffer-local mappings; do not replace the
    surface with a gesture-only dashboard.
-7. Treat public action IDs, event names, and RPC payloads as contracts. Version
+8. Treat public action IDs, event names, and RPC payloads as contracts. Version
    them before making incompatible changes.
-8. Extensions may use public services and events. They must not reach into
+9. Extensions may use public services and events. They must not reach into
    renderer internals or execute arbitrary Lua through RPC.
-9. Keep user-facing behavior compatible with Fugitive where the PRD calls it
-   out, and call out deliberate differences in docs.
-10. Prefer small focused modules and existing Neovim primitives over speculative
-   abstraction.
-11. Follow [`docs/development.md`](docs/development.md): stage the work,
+10. Keep user-facing behavior compatible with Fugitive where the PRD calls it
+    out, and call out deliberate differences in docs.
+11. Prefer small focused modules and existing Neovim primitives over speculative
+    abstraction.
+12. Follow [`docs/development.md`](docs/development.md): stage the work,
     capture iteration evidence, and record decisions that constrain future
     agents.
-12. For every user-facing mapping or action, add a clean headless interaction
+13. For every user-facing mapping or action, add a clean headless interaction
     assertion. Command coverage alone is not interaction coverage.
-13. Keep `doc/currantgit.txt` current for public CurrantGit behavior. Document
+14. Write the test first. For a bug fix, write the regression test against the
+    unfixed code, watch it fail for the right reason, then fix it — a test you
+    only wrote after the fix proves the fix ran, not that it caught anything.
+    For an async action, wait on a signal that can only become true once that
+    specific action finished, not a flag a reused buffer can already satisfy
+    from its previous render. See [`docs/gotchas.md`](docs/gotchas.md) for why
+    that specific mistake is not hypothetical.
+15. Keep `doc/currantgit.txt` current for public CurrantGit behavior. Document
     plugin-specific semantics and boundaries; defer generic Vim help to Vim.
+16. Any change touching repository identity, revisions, pathspecs, patches, or
+    index/worktree state follows the Git safety doctrine and the two-phase
+    implementation/adversarial-validation workflow in
+    [`docs/development.md`](docs/development.md). A green test suite you wrote
+    yourself is not the finish line for that kind of change.
 
 ## Validation
 
@@ -135,6 +159,10 @@ default agent loop is: inspect, branch, implement, test, document, review,
 commit, and push. Use a `codex/` branch prefix unless the user supplies an
 exact branch name. Preserve the checkout and branch boundary; never silently
 rewrite unrelated work.
+
+If the work order touches repository identity, revisions, pathspecs, patches,
+or index/worktree state, "review" in that loop means the adversarial
+validation pass from `docs/development.md`, not a re-read of the diff.
 
 Pushing is part of the normal handoff when a remote and credentials are
 available. If the repository has no remote, or the push requires new authority,

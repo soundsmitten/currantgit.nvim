@@ -24,7 +24,14 @@ through the repository, the harness, and the review trail.
 CurrantGit is meant to be rock solid in a real worktree. Mutations are
 explicit, safety boundaries are visible, and failures should leave repository
 state unchanged. The project favors bounded blast radius, reversible actions,
-and honest validation over clever automation. Here be dragons: dangerous or
+and honest validation over clever automation.
+
+A green test suite is a start, not a verdict — especially at the Git boundary,
+where a locally reasonable assumption can quietly become a destructive
+operation. The agent that built a change does not get the final word on
+whether it is safe; that word comes from independently checking it against
+real Git. See [`docs/development.md`](docs/development.md) for the doctrine
+and the two-phase workflow that enforces it. Here be dragons: dangerous or
 still-evolving edges are named, isolated, confirmed, and tested before they
 become defaults.
 
@@ -35,6 +42,12 @@ slice now exists: a clean-Neovim harness, a temporary Git fixture, and a
 minimal `:Git` status surface with semantic change items. The broader product
 contract is in [`docs/CurrantGit-PRD.md`](docs/CurrantGit-PRD.md); the docs
 continue to distinguish direction from completed behavior.
+
+`:Git log` now provides a read-only semantic commit list: `<CR>` opens a
+commit, `r` refreshes while retaining the selected commit, and `g?` shows
+contextual actions. Counts, revision ranges, and path filters are supported;
+custom output such as `:Git log --oneline` uses the command escape hatch.
+See `:help currantgit-log` for the supported arguments and current boundaries.
 
 ## Product shape
 
@@ -115,8 +128,12 @@ plugin model.
   pluggability
 - [`AGENTS.md`](AGENTS.md) — contributor and coding-agent guide
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — issue-to-agent workflow and handoff
-- [`docs/development.md`](docs/development.md) — stages, iterations, and
-  anti-drift guardrails
+- [`docs/development.md`](docs/development.md) — stages, iterations,
+  anti-drift guardrails, and the Git safety doctrine
+- [`docs/gotchas.md`](docs/gotchas.md) — empirical Git/Neovim landmines,
+  verified not assumed
+- [`docs/decisions/`](docs/decisions/) — numbered ADRs for decisions that
+  constrain later work
 
 ## Contributing
 
