@@ -17,6 +17,8 @@ local open_diff
 local open_deleted
 local open_blame
 local open_activity
+local open_commit
+local set_buffer
 
 local function schedule(callback)
   vim.schedule(function()
@@ -240,6 +242,10 @@ open_blame = function(path)
       vim.b[buffer].currantgit_title = "blame"
       vim.b[buffer].currantgit_blame_rows = rows
       vim.b[buffer].currantgit_blame_source = source_buffer
+      vim.keymap.set("n", "<CR>", function()
+        local row = vim.b[buffer].currantgit_blame_rows[vim.api.nvim_win_get_cursor(0)[1]]
+        if row then open_commit(row.commit) end
+      end, { buffer = buffer, silent = true, desc = "Open blamed commit" })
       vim.keymap.set("n", "gq", function() vim.cmd("close") end, {
         buffer = buffer,
         silent = true,
@@ -256,6 +262,28 @@ open_blame = function(path)
           end
         end,
       })
+      navigation.visit(0)
+    end)
+  end)
+end
+
+open_commit = function(commit)
+  local root, error_message = repository_root()
+  if not root then
+    vim.notify("CurrantGit: " .. error_message, vim.log.levels.ERROR)
+    return
+  end
+  execute({ git_command(), "show", "--stat", "--patch", "--decorate", commit }, {
+    cwd = root,
+    text = true,
+  }, function(result)
+    schedule(function()
+      if result.code ~= 0 then
+        vim.notify("CurrantGit: " .. (result.stderr or "git show failed"), vim.log.levels.ERROR)
+        return
+      end
+      navigation.update(0)
+      set_buffer(vim.split(vim.trim(result.stdout or ""), "\n", { plain = true }), {}, "commit/" .. commit:sub(1, 8), {}, root)
       navigation.visit(0)
     end)
   end)
@@ -294,7 +322,7 @@ local function attach_status(buffer)
   update_discovery(buffer)
 end
 
-local function set_buffer(lines, items, title, line_items, root, fold_levels)
+set_buffer = function(lines, items, title, line_items, root, fold_levels)
   local name = "currantgit://" .. title
   local buffer = vim.fn.bufnr(name)
   if buffer < 0 or not vim.api.nvim_buf_is_valid(buffer) then
