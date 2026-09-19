@@ -17,6 +17,23 @@ these, see [`decisions/`](decisions/).
   `->` omitted, field order reversed from the human format) per
   `git help status`. See [`decisions/0004`](decisions/0004-status-parsing-uses-nul-delimited-porcelain.md).
 
+- **A `---`/`+++` unified-diff header path is not always the raw filename.**
+  Two independent Git mechanisms can transform it: (1) `core.quotePath`
+  (default on) C-quotes/octal-escapes a path with "unusual" bytes -- and per
+  `git help config`, double-quotes/backslash/control characters are
+  *always* escaped this way regardless of that setting, while any byte above
+  0x80 (i.e. any non-ASCII/unicode path) is escaped only under the default;
+  (2) independently, a path containing a literal space gets exactly one
+  literal trailing tab character appended (verified empirically: one tab
+  regardless of how many embedded spaces), to disambiguate the path from a
+  possible trailing text field in strict unified-diff format. Both can
+  combine. There is no `-z`-equivalent for these header lines specifically —
+  `-z` only changes `--raw`/`--numstat`/`--name-only`/`--name-status`
+  output, not `diff --git`/`---`/`+++` lines (per `git help diff`). A parser
+  extracting a hunk's real path from `+++ b/<path>` must undo both
+  transformations, not assume the text after `b/` is the literal filename.
+  See [`decisions/0011`](decisions/0011-unusual-path-diff-header-parsing.md).
+
 - **`-z` output is unquoted; the human format is not.** By default
   (`core.quotePath=true`), `git status`/`git diff` C-quote and
   octal-escape filenames containing tabs, newlines, quotes, backslashes, or

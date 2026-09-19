@@ -1,5 +1,40 @@
 local M = {}
 
+-- Git C-quotes/octal-escapes a `diff --git`/`---`/`+++` header path when it
+-- contains "unusual" bytes (tabs, newlines, quotes, backslashes, or --
+-- unconditionally under the default `core.quotePath=true` -- any byte above
+-- 0x80, i.e. any non-ASCII/unicode path). `git help config`, core.quotePath:
+-- "Double-quotes, backslash and control characters are always escaped
+-- regardless of the setting of this variable." There is no `-z`-equivalent
+-- for unified-diff header lines specifically (`-z` only affects
+-- `--raw`/`--numstat`/`--name-only`/`--name-status`, per `git help diff`),
+-- so a header path must be unquoted here rather than assumed to be raw.
+local function unquote_diff_path(text)
+  -- A path containing a literal space (but nothing else "unusual" enough to
+  -- trigger quoting) gets a single trailing tab appended instead, to
+  -- disambiguate the path from a possible trailing text field in strict
+  -- unified-diff format. Verified empirically: exactly one trailing tab,
+  -- independent of how many embedded spaces the path has, and independent
+  -- of the quoting below (quoting and the tab suffix are separate
+  -- mechanisms and can combine).
+  local trimmed = text:gsub("\t$", "")
+  local body = trimmed:match('^"(.*)"$')
+  if not body then
+    return trimmed
+  end
+  body = body:gsub("\\([0-7][0-7][0-7])", function(octal)
+    return string.char(tonumber(octal, 8))
+  end)
+  body = body:gsub("\\(.)", function(escaped)
+    if escaped == "t" then return "\t"
+    elseif escaped == "n" then return "\n"
+    elseif escaped == '"' then return '"'
+    elseif escaped == "\\" then return "\\"
+    else return escaped end
+  end)
+  return body
+end
+
 function M.parse(stdout, options)
   options = options or {}
   local lines = vim.split(stdout or "", "\n", { plain = true })
@@ -27,7 +62,8 @@ function M.parse(stdout, options)
       end
       local path = options.path
       for _, header in ipairs(hunk_header) do
-        local header_path = header:match("^%+%+%+ b/(.+)")
+        local raw_header_path = header:match("^%+%+%+ (.+)$")
+        local header_path = raw_header_path and unquote_diff_path(raw_header_path):match("^b/(.+)")
         if header_path then path = header_path end
       end
       local hunk = {

@@ -21,6 +21,23 @@ local function git(args, cwd)
   return vim.trim(result.stdout or "")
 end
 
+-- `--name-only` without `-z` C-quotes/octal-escapes unusual paths (same
+-- `core.quotePath` behavior as diff headers -- see diff.lua's
+-- `unquote_diff_path`), so a plain string comparison against a raw unicode
+-- filename would spuriously fail even when the correct file is staged.
+-- `-z` gives raw, unquoted, NUL-terminated paths instead.
+local function changed_paths(args, cwd)
+  local result = vim.system(vim.list_extend({ "git" }, vim.list_extend(vim.deepcopy(args), { "-z" })), {
+    cwd = cwd, text = true,
+  }):wait()
+  assert(result.code == 0, result.stderr)
+  local paths = {}
+  for _, entry in ipairs(vim.split(result.stdout or "", "\0", { plain = true })) do
+    if entry ~= "" then paths[#paths + 1] = entry end
+  end
+  return paths
+end
+
 local function read_file(path)
   local file = assert(io.open(path, "r"))
   local content = file:read("*a")
@@ -743,6 +760,107 @@ local function test_hunk_stage_pinned_to_render_time_not_worktree()
   vim.fn.delete(repo, "rf")
 end
 
+-- 15. Unusual-but-valid paths through the real UI (audit continuation item
+-- 4, combined with item 5): a filename containing non-ASCII bytes makes Git
+-- C-quote/octal-escape it in unified-diff headers (`core.quotePath`, always
+-- on for such bytes) -- `diff --git "a/caf\303\251.txt" "b/caf\303\251.txt"`,
+-- not `diff --git a/café.txt b/café.txt`. `diff.lua`'s
+-- `+++ b/(.+)` header-path regex didn't match that quoted form, so it fell
+-- through to `open_diff_args`'s naive fallback path -- which, reached via
+-- the real `d` (diff) mapping, is the RAW constructed pathspec including
+-- CurrantGit's own `:(literal)` prefix, not the real filename. `hunk.path`
+-- ended up literally `":(literal)café.txt"`. Also exercises stage, unstage,
+-- discard, open, and blame against unicode, embedded-space, and
+-- leading-dash filenames end-to-end.
+local function test_unusual_paths_end_to_end()
+  local repo = make_repo()
+  local paths = { "café.txt", "file with spaces.txt", "-dashfile.txt" }
+  for _, path in ipairs(paths) do
+    write_file(repo .. "/" .. path, "one\n")
+  end
+  git({ "add", "." }, repo)
+  git({ "commit", "-q", "-m", "base" }, repo)
+  for _, path in ipairs(paths) do
+    write_file(repo .. "/" .. path, "one\ntwo\n")
+  end
+
+  vim.cmd("cd " .. vim.fn.fnameescape(repo))
+
+  for _, path in ipairs(paths) do
+    open_status_and_wait()
+    goto_item(path)
+
+    local before_buffer = vim.api.nvim_get_current_buf()
+    local before_tick = vim.api.nvim_buf_get_changedtick(before_buffer)
+    local diff_mapping = vim.fn.maparg("d", "n", false, true)
+    diff_mapping.callback()
+    assert(vim.wait(3000, function()
+      return vim.bo.filetype == "diff"
+        and (vim.api.nvim_get_current_buf() ~= before_buffer
+          or vim.api.nvim_buf_get_changedtick(before_buffer) > before_tick)
+    end, 10), "diff did not open for " .. path)
+    assert_contains(vim.api.nvim_buf_get_lines(0, 0, -1, false), "+two")
+    for _, item in pairs(vim.b.currantgit_line_items or {}) do
+      if type(item) == "table" and item.kind == "hunk" then
+        assert(item.path == path,
+          "hunk.path for " .. path .. " must be the real filename, got: " .. vim.inspect(item.path))
+      end
+    end
+
+    open_status_and_wait()
+    goto_item(path)
+    local stage_mapping = vim.fn.maparg("s", "n", false, true)
+    stage_mapping.callback()
+    assert(vim.wait(3000, function()
+      local staged = changed_paths({ "diff", "--cached", "--name-only" }, repo)
+      return vim.tbl_contains(staged, path)
+    end, 10), "stage did not settle for " .. path)
+
+    open_status_and_wait()
+    goto_item(path)
+    local unstage_mapping = vim.fn.maparg("u", "n", false, true)
+    unstage_mapping.callback()
+    assert(vim.wait(3000, function()
+      return not vim.tbl_contains(changed_paths({ "diff", "--cached", "--name-only" }, repo), path)
+    end, 10), "unstage did not settle for " .. path)
+    local unstaged = changed_paths({ "diff", "--name-only" }, repo)
+    assert(vim.tbl_contains(unstaged, path), "the file should be back to unstaged-modified")
+
+    open_status_and_wait()
+    goto_item(path)
+    local before_blame_buffer = vim.api.nvim_get_current_buf()
+    local blame_mapping = vim.fn.maparg("b", "n", false, true)
+    blame_mapping.callback()
+    assert(vim.wait(3000, function()
+      return vim.api.nvim_get_current_buf() ~= before_blame_buffer and vim.bo.filetype == "git"
+    end, 10), "blame did not open for " .. path)
+    assert_contains(vim.api.nvim_buf_get_lines(0, 0, -1, false), "one")
+
+    open_status_and_wait()
+    goto_item(path)
+    local original_select = vim.ui.select
+    vim.ui.select = function(_, _, callback) callback("Discard", 1) end
+    local discard_mapping = vim.fn.maparg("X", "n", false, true)
+    discard_mapping.callback()
+    assert(vim.wait(3000, function()
+      for _, item in ipairs(vim.b.currantgit_items or {}) do
+        if item.path == path then return false end
+      end
+      return true
+    end, 10), "discard did not settle for " .. path)
+    vim.ui.select = original_select
+    assert(read_file(repo .. "/" .. path) == "one\n", "discard did not revert " .. path)
+  end
+
+  for _, path in ipairs(paths) do
+    assert(read_file(repo .. "/" .. path) == "one\n", path .. " must be back to its committed content")
+  end
+  assert(#currantgit.errors() == 0, table.concat(currantgit.errors(), "\n"))
+
+  vim.cmd("cd " .. vim.fn.fnameescape(original_cwd))
+  vim.fn.delete(repo, "rf")
+end
+
 test_cwd_race()
 test_glob_pathspec()
 test_blame_multiline()
@@ -757,5 +875,6 @@ test_hunk_stage_no_trailing_newline()
 test_hunk_stage_sequential_multi_hunk()
 test_hunk_stage_atomic_on_conflict()
 test_hunk_stage_pinned_to_render_time_not_worktree()
+test_unusual_paths_end_to_end()
 assert(#currantgit.errors() == 0, table.concat(currantgit.errors(), "\n"))
 print("CurrantGit safety: ok")

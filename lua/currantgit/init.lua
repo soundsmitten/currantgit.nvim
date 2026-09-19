@@ -599,6 +599,15 @@ open_diff_args = function(args, root)
       for index, arg in ipairs(args) do
         if arg == "--" then path = args[index + 1] end
       end
+      -- `path` here is only a fallback for the (practically unreachable for
+      -- real `git diff` output) case where a hunk has no preceding `diff
+      -- --git` header at all -- see diff.lua. Strip CurrantGit's own
+      -- `:(literal)` pathspec-magic prefix so that fallback, if it is ever
+      -- actually used, still gets the real filename rather than the raw
+      -- constructed pathspec.
+      if path then
+        path = path:gsub("^:%(literal%)", "")
+      end
       local lines, fold_levels, line_items, hunks = diff.parse(result.stdout or "", { mode = mode, path = path })
       navigation.update(0)
       set_buffer(lines, hunks, "diff", line_items, root, fold_levels)
