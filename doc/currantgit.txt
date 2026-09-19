@@ -51,6 +51,11 @@ g?                      Show the available status actions.
 The discovery line is generated from the same action metadata as the mappings.
 It is a hint, not a second keymap definition.
 
+Integrations can use `require('currantgit').discovery()` for structured
+`id`, `key`, `label`, and `desc` entries, or
+`require('currantgit').which_key()` for a WhichKey-compatible mapping table.
+Both projections are contextual to the item under the cursor.
+
 The diff action opens a read-only diff surface. Hunk headers are native fold
 roots, so |fold-commands| can collapse or reopen each hunk.
 

@@ -52,6 +52,12 @@ vim.cmd("normal! zo")
 goto_item("tracked.txt")
 local current_item = vim.b.currantgit_line_items[vim.api.nvim_win_get_cursor(0)[1]]
 local actions = require("currantgit.actions").available(current_item, { buffer = 0 })
+local discovery = require("currantgit.actions").discovery(current_item, { buffer = 0 })
+local discovered_ids = {}
+for _, action in ipairs(discovery) do discovered_ids[action.id] = action end
+assert(discovered_ids["item.open"].desc == "open", "discovery metadata should expose action descriptions")
+assert(require("currantgit").discovery()[1].key, "public discovery projection should expose keys")
+assert(require("currantgit").which_key()["<CR>"].desc == "open", "WhichKey projection should expose the open action")
 local action_ids = {}
 for _, action in ipairs(actions) do
   action_ids[action.id] = true
