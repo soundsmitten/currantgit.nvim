@@ -17,6 +17,7 @@ COMMANDS                                                        *currantgit-comm
                         for the current working directory.
 
 :Git status               Open or refresh the status surface.
+:GitActivity              Open the optional read-only Git command activity log.
 :Git {args}               Run an arbitrary Git command and display its output
                           in a CurrantGit command surface.
 
@@ -67,6 +68,10 @@ for a path that no longer exists.
 The `b` action opens a blame companion split for the selected file. The source
 buffer remains available beside the read-only attribution buffer. `gq` closes
 the blame companion and returns to the source buffer.
+
+`:GitActivity` shows the bounded command ledger: argv, duration, exit code,
+and summarized output. It is an inspection surface, not a replacement for
+the status projection.
 
 ===============================================================================
 CONFIGURATION                                           *currantgit-configuration*
