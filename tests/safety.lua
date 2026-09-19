@@ -370,11 +370,70 @@ local function test_diff_mode_trust()
   vim.fn.delete(repo, "rf")
 end
 
+-- 7. `:Git` argument splitting (HIGH): `command.args` (Neovim's `<args>`,
+-- confirmed via `:help nvim_create_user_command()` to be the raw,
+-- unprocessed argument string -- NOT quote-aware `<q-args>`-then-split) must
+-- be tokenized the way a user typing `:Git commit -m "two words"` expects: a
+-- quoted multi-word argument survives as one argv element. Naive
+-- whitespace-only splitting instead produces `{"commit", "-m", '"two',
+-- 'words"'}`, which either fails outright or silently commits the wrong
+-- message.
+local function test_git_command_quoted_args()
+  local repo = make_repo()
+  write_file(repo .. "/f.txt", "one\n")
+  git({ "add", "f.txt" }, repo)
+  git({ "commit", "-q", "-m", "base" }, repo)
+  write_file(repo .. "/f.txt", "one\ntwo\n")
+  git({ "add", "f.txt" }, repo)
+
+  vim.cmd("cd " .. vim.fn.fnameescape(repo))
+  vim.cmd([[Git commit -m "two words"]])
+  assert(vim.wait(3000, function()
+    return git({ "log", "-1", "--format=%s" }, repo) == "two words"
+  end, 10), "quoted multi-word :Git commit argument was not preserved as one argv element")
+  assert(git({ "status", "--porcelain" }, repo) == "", "commit should have left the worktree clean")
+
+  write_file(repo .. "/f.txt", "one\ntwo\nthree\n")
+  git({ "add", "f.txt" }, repo)
+  vim.cmd([[Git commit -m 'single-quoted words too']])
+  assert(vim.wait(3000, function()
+    return git({ "log", "-1", "--format=%s" }, repo) == "single-quoted words too"
+  end, 10), "single-quoted multi-word :Git commit argument was not preserved as one argv element")
+
+  write_file(repo .. "/f.txt", "one\ntwo\nthree\nfour\n")
+  git({ "add", "f.txt" }, repo)
+  vim.cmd([[Git commit -m "quote: \"nested\""]])
+  assert(vim.wait(3000, function()
+    return git({ "log", "-1", "--format=%s" }, repo) == 'quote: "nested"'
+  end, 10), "escaped double-quote inside a quoted argument was not preserved")
+
+  -- An unterminated quote is malformed input: refuse cleanly and touch
+  -- nothing, rather than guessing where the argument was meant to end.
+  -- Dispatched through real cmdline key input (`nvim_feedkeys`), not
+  -- `vim.cmd()`/`nvim_exec2()` -- a synchronous `vim.notify(ERROR)` inside a
+  -- user-command callback re-raises as a Vim error when invoked through
+  -- `nvim_exec2`, which is an artifact of that entry point, not of how a
+  -- real `:Git ...<CR>` keypress behaves.
+  local before_status = git({ "status", "--porcelain" }, repo)
+  vim.api.nvim_feedkeys(
+    vim.api.nvim_replace_termcodes([[:Git commit -m "unterminated<CR>]], true, false, true),
+    "x",
+    false
+  )
+  vim.wait(200, function() return false end, 10)
+  assert(git({ "status", "--porcelain" }, repo) == before_status,
+    "an unterminated quote must not run any Git command or change repository state")
+
+  vim.cmd("cd " .. vim.fn.fnameescape(original_cwd))
+  vim.fn.delete(repo, "rf")
+end
+
 test_cwd_race()
 test_glob_pathspec()
 test_blame_multiline()
 test_diff_trailing_binary()
 test_status_rename_and_status_codes()
 test_diff_mode_trust()
+test_git_command_quoted_args()
 assert(#currantgit.errors() == 0, table.concat(currantgit.errors(), "\n"))
 print("CurrantGit safety: ok")

@@ -75,6 +75,27 @@ these, see [`decisions/`](decisions/).
 
 ## Neovim / test harness
 
+- **A Lua `nvim_create_user_command` callback's `args` field is the raw,
+  unprocessed `<args>` text, not quote-aware.** `:help nvim_create_user_command()`
+  documents `args` as "Args passed to the command, if any. `<args>`" — the
+  quote-aware forms are the *separate* `<q-args>` (whole remainder as one
+  expression-quoted string) and `<f-args>` (whitespace-split, individually
+  quoted) escape sequences, neither of which a Lua callback receives. A
+  plain `vim.fn.split(args, [[\s\+]], true)` on `command.args` will happily
+  split `commit -m "two words"` into `{"commit", "-m", "\"two", "words\""}`.
+  See [`decisions/0008`](decisions/0008-git-command-quote-aware-argument-splitting.md).
+
+- **A synchronous `vim.notify(msg, ERROR)` (or `WARN`) inside a user-command
+  callback re-raises as a Vim error (`E5108`) when that command is invoked
+  through `vim.cmd()`/`nvim_exec2()`, but not when invoked through real
+  cmdline key input (`nvim_feedkeys(":Cmd<CR>", "x", false)`).** This is an
+  artifact of `nvim_exec2`'s error propagation for the invocation path, not
+  of `vim.notify` itself or of how a real `:Cmd<CR>` keypress behaves. A test
+  that drives a command expected to synchronously `vim.notify(ERROR)` should
+  dispatch it via `nvim_feedkeys`, not `vim.cmd()`, or the test will see an
+  uncaught Lua error instead of the graceful notification the real user
+  sees.
+
 - **Waiting on a buffer's `filetype`/a `vim.b` flag after triggering an
   async refresh can return before the refresh actually ran**, if the same
   buffer is being reused and already had that flag set from its *previous*

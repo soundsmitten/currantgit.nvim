@@ -62,11 +62,64 @@ local function execute(args, opts, callback, input)
   end
 end
 
+-- `command.args` (the Lua-callback equivalent of `<args>`, confirmed via
+-- `:help nvim_create_user_command()`) is the raw, unprocessed text typed
+-- after `:Git` -- Neovim does no quote-aware tokenization on it before this
+-- function ever sees it (that's what the *separate* `<q-args>`/`<f-args>`
+-- escape sequences are for, and neither is in play here). A naive
+-- whitespace-only split therefore breaks any argument containing spaces:
+-- `:Git commit -m "two words"` would become
+-- `{"commit", "-m", "\"two", "words\""}` instead of
+-- `{"commit", "-m", "two words"}`. This performs basic POSIX-shell-like word
+-- splitting instead: single quotes are literal, double quotes allow `\"`
+-- and `\\` escapes, and a bare backslash outside quotes escapes the next
+-- character. An unterminated quote is treated as malformed input and
+-- refused outright (Git safety doctrine: failure should be boring) rather
+-- than guessed at.
 local function split_args(args)
   if args == "" then
     return {}
   end
-  return vim.fn.split(args, [[\s\+]], true)
+  local result = {}
+  local current
+  local quote
+  local index = 1
+  local length = #args
+  while index <= length do
+    local char = args:sub(index, index)
+    if quote then
+      if char == quote then
+        quote = nil
+      elseif char == "\\" and quote == '"' and index < length
+        and (args:sub(index + 1, index + 1) == '"' or args:sub(index + 1, index + 1) == "\\") then
+        index = index + 1
+        current = (current or "") .. args:sub(index, index)
+      else
+        current = (current or "") .. char
+      end
+    elseif char == '"' or char == "'" then
+      quote = char
+      current = current or ""
+    elseif char == "\\" and index < length then
+      index = index + 1
+      current = (current or "") .. args:sub(index, index)
+    elseif char:match("%s") then
+      if current then
+        result[#result + 1] = current
+        current = nil
+      end
+    else
+      current = (current or "") .. char
+    end
+    index = index + 1
+  end
+  if quote then
+    return nil, "unterminated " .. quote .. " quote in arguments"
+  end
+  if current then
+    result[#result + 1] = current
+  end
+  return result
 end
 
 local function git_command()
@@ -939,7 +992,12 @@ function M.setup(opts)
   })
 
   vim.api.nvim_create_user_command("Git", function(command)
-    M.git(split_args(command.args))
+    local args, error_message = split_args(command.args)
+    if not args then
+      vim.notify("CurrantGit: " .. error_message, vim.log.levels.ERROR)
+      return
+    end
+    M.git(args)
   end, {
     bang = true,
     nargs = "*",
