@@ -200,13 +200,15 @@ local function set_buffer(lines, items, title, line_items, root, fold_levels)
   return buffer
 end
 
-open_diff = function(item)
+local open_diff_args
+
+open_diff_args = function(args)
   local root, error_message = repository_root()
   if not root then
     vim.notify("CurrantGit: " .. error_message, vim.log.levels.ERROR)
     return
   end
-  vim.system({ git_command(), "diff", "--", item.path }, {
+  vim.system(vim.list_extend({ git_command() }, args), {
     cwd = root,
     text = true,
   }, function(result)
@@ -221,6 +223,10 @@ open_diff = function(item)
       navigation.visit(0)
     end)
   end)
+end
+
+open_diff = function(item)
+  open_diff_args({ "diff", "--", item.path })
 end
 
 local function parse_status(stdout)
@@ -365,6 +371,8 @@ end
 function M.git(args)
   if #args == 0 or args[1] == "status" then
     open_status()
+  elseif args[1] == "diff" then
+    open_diff_args(args)
   else
     run_git(args)
   end
