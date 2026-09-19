@@ -16,6 +16,8 @@ git -C "$fixture" add tracked.txt
 git -C "$fixture" add discard.txt
 git -C "$fixture" add deleted.txt
 git -C "$fixture" commit -q -m "fixture base"
+git -C "$fixture" commit -q --allow-empty -m "fixture second"
+git -C "$fixture" commit -q --allow-empty -m "fixture latest"
 printf 'one\nchanged\n' > "$fixture/tracked.txt"
 printf 'throw this away\n' > "$fixture/discard.txt"
 rm "$fixture/deleted.txt"
@@ -33,4 +35,4 @@ CURRANTGIT_ROOT="$repo_root" \
     --noplugin \
     -u "$repo_root/tests/minimal-init.lua" \
     --cmd "cd $fixture" \
-    -c "luafile $repo_root/tests/smoke.lua"
+    -c "lua local ok, err = xpcall(function() dofile(vim.env.CURRANTGIT_ROOT .. '/tests/smoke.lua') end, debug.traceback); if not ok then print(err); vim.cmd('cquit 1') end"

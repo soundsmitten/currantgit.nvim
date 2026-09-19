@@ -3,6 +3,7 @@ local config = require("currantgit.config")
 local actions = require("currantgit.actions")
 local blame = require("currantgit.blame")
 local diff = require("currantgit.diff")
+local git_log = require("currantgit.log")
 local navigation = require("currantgit.navigation")
 local rpc = require("currantgit.rpc")
 
@@ -11,6 +12,7 @@ local state = {
   opts = {},
   errors = {},
   command_log = {},
+  log_request = 0,
 }
 
 local open_status
@@ -19,9 +21,11 @@ local open_deleted
 local open_blame
 local open_activity
 local open_commit
+local open_log
 local open_diff_args
 local set_buffer
 local attach_diff
+local attach_log
 
 local function schedule(callback)
   vim.schedule(function()
@@ -145,12 +149,17 @@ local function action_context(buffer)
     end
     action(args, callback, item.patch)
   end
+  local function refresh()
+    if vim.b[buffer].currantgit_title == "log" then
+      open_log(vim.b[buffer].currantgit_log_args, root)
+    else
+      open_status()
+    end
+  end
   return {
     buffer = buffer,
     root = root,
-    refresh = function()
-      open_status()
-    end,
+    refresh = refresh,
     open = function(item)
       navigation.update(0)
       if item.change_kind == "deleted" then
@@ -181,6 +190,9 @@ local function action_context(buffer)
       apply_hunk(item, { "apply", "--cached", "--unidiff-zero", "--reverse" }, function()
         open_diff_args(vim.b[buffer].currantgit_diff_args)
       end)
+    end,
+    commit = function(item)
+      open_commit(item.commit, root)
     end,
     discard = function(item)
       vim.ui.select({ "Discard", "Cancel" }, {
@@ -293,8 +305,9 @@ open_blame = function(path)
   end)
 end
 
-open_commit = function(commit)
-  local root, error_message = repository_root()
+open_commit = function(commit, root)
+  local error_message
+  if not root then root, error_message = repository_root() end
   if not root then
     vim.notify("CurrantGit: " .. error_message, vim.log.levels.ERROR)
     return
@@ -357,6 +370,24 @@ attach_diff = function(buffer)
   })
 end
 
+attach_log = function(buffer)
+  vim.keymap.set("n", "<CR>", function() dispatch_current(buffer, "commit.open") end, {
+    buffer = buffer, silent = true, desc = "Open commit",
+  })
+  vim.keymap.set("n", "r", function() dispatch_current(buffer, "surface.refresh") end, {
+    buffer = buffer, silent = true, desc = "Refresh log",
+  })
+  vim.keymap.set("n", "g?", function() dispatch_current(buffer, "surface.help") end, {
+    buffer = buffer, silent = true, desc = "Log help",
+  })
+  local group = vim.api.nvim_create_augroup("CurrantGitLog" .. buffer, { clear = true })
+  vim.api.nvim_create_autocmd("CursorMoved", {
+    group = group, buffer = buffer,
+    callback = function() update_discovery(buffer) end,
+  })
+  update_discovery(buffer)
+end
+
 set_buffer = function(lines, items, title, line_items, root, fold_levels)
   local name = "currantgit://" .. title
   local buffer = vim.fn.bufnr(name)
@@ -389,8 +420,70 @@ set_buffer = function(lines, items, title, line_items, root, fold_levels)
     attach_status(buffer)
   elseif title == "diff" then
     attach_diff(buffer)
+  elseif title == "log" then
+    attach_log(buffer)
   end
   return buffer
+end
+
+open_log = function(args, root)
+  local error_message
+  if not root then root, error_message = repository_root() end
+  if not root then
+    vim.notify("CurrantGit: " .. error_message, vim.log.levels.ERROR)
+    return
+  end
+  local log_args = vim.deepcopy(args or { "log" })
+  local origin = vim.api.nvim_get_current_buf()
+  local window = vim.api.nvim_get_current_win()
+  local refreshing = vim.b[origin].currantgit_title == "log"
+    and vim.b[origin].currantgit_root == root
+    and vim.deep_equal(vim.b[origin].currantgit_log_args, log_args)
+  local selected = refreshing and current_item(origin)
+  local view = refreshing and vim.fn.winsaveview()
+  state.log_request = state.log_request + 1
+  local request = state.log_request
+  execute(vim.list_extend({ git_command() }, git_log.arguments(log_args)), {
+    cwd = root,
+    text = false,
+  }, function(result)
+    schedule(function()
+      if request ~= state.log_request or not vim.api.nvim_win_is_valid(window)
+        or vim.api.nvim_get_current_win() ~= window
+        or vim.api.nvim_win_get_buf(window) ~= origin then return end
+      if result.code ~= 0 then
+        vim.notify("CurrantGit: " .. (result.stderr or "git log failed"), vim.log.levels.ERROR)
+        return
+      end
+      local items, parse_error = git_log.parse(result.stdout or "", root)
+      if not items then
+        vim.notify("CurrantGit: " .. parse_error, vim.log.levels.ERROR)
+        return
+      end
+      local lines, line_items = git_log.render(items)
+      navigation.update(0)
+      local buffer = set_buffer(lines, items, "log", line_items, root)
+      vim.b.currantgit_log_args = log_args
+      if view then
+        if selected then
+          for line, item in pairs(line_items) do
+            if item.id == selected.id then
+              view.topline = math.max(1, view.topline + line - view.lnum)
+              view.lnum = line
+              break
+            end
+          end
+        end
+        view.lnum = math.min(view.lnum, #lines)
+        vim.fn.winrestview(view)
+        navigation.update(0)
+      else
+        vim.api.nvim_win_set_cursor(0, { #items > 0 and 2 or 1, 0 })
+        navigation.visit(0)
+      end
+      update_discovery(buffer)
+    end)
+  end)
 end
 
 open_diff_args = function(args)
@@ -604,6 +697,8 @@ function M.git(args)
       return
     end
     open_blame(path)
+  elseif args[1] == "log" and git_log.arguments(args) then
+    open_log(args)
   else
     run_git(args)
   end
@@ -629,6 +724,16 @@ function M.setup(opts)
     key = "r",
     run = function(context)
       context.refresh()
+      return true
+    end,
+  })
+  actions.register({
+    id = "commit.open",
+    label = "open commit",
+    key = "<CR>",
+    applies_to = { "commit" },
+    run = function(context, item)
+      context.commit(item)
       return true
     end,
   })
@@ -715,8 +820,12 @@ function M.setup(opts)
     id = "surface.help",
     label = "help",
     key = "g?",
-    run = function()
-      vim.notify("CurrantGit: <CR> open   d diff   s stage   u unstage   - toggle   X discard   r refresh", vim.log.levels.INFO)
+    run = function(context, item)
+      local labels = {}
+      for _, action in ipairs(actions.discovery(item, context)) do
+        labels[#labels + 1] = action.key .. " " .. action.label
+      end
+      vim.notify("CurrantGit: " .. table.concat(labels, "   "), vim.log.levels.INFO)
       return true
     end,
   })

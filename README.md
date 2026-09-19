@@ -36,6 +36,12 @@ minimal `:Git` status surface with semantic change items. The broader product
 contract is in [`docs/CurrantGit-PRD.md`](docs/CurrantGit-PRD.md); the docs
 continue to distinguish direction from completed behavior.
 
+`:Git log` now provides a read-only semantic commit list: `<CR>` opens a
+commit, `r` refreshes while retaining the selected commit, and `g?` shows
+contextual actions. Counts, revision ranges, and path filters are supported;
+custom output such as `:Git log --oneline` uses the command escape hatch.
+See `:help currantgit-log` for the supported arguments and current boundaries.
+
 ## Product shape
 
 - A real buffer is the primary UI.

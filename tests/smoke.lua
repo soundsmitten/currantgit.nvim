@@ -315,5 +315,7 @@ blame_close_mapping.callback()
 vim.wait(2000, function() return #vim.api.nvim_list_wins() == 1 end)
 assert(#vim.api.nvim_list_wins() == 1, "gq should close blame and return to the source")
 
+dofile(vim.env.CURRANTGIT_ROOT .. "/tests/log.lua")
+assert_no_async_errors()
 print("CurrantGit smoke: ok")
 vim.cmd("qa!")
