@@ -41,12 +41,37 @@ assert(action_ids["surface.refresh"], "surface is missing the refresh action")
 assert_contains(vim.api.nvim_buf_get_lines(0, -2, -1, false), "Actions:")
 
 local status_buffer = vim.api.nvim_get_current_buf()
-vim.cmd("normal r")
+local refresh_mapping = vim.fn.maparg("r", "n", false, true)
+assert(refresh_mapping.callback, "refresh mapping was not registered")
+refresh_mapping.callback()
 vim.wait(5000, function()
   return vim.api.nvim_get_current_buf() == status_buffer and vim.b.currantgit_title == "status"
 end)
 assert_no_async_errors()
 assert(vim.api.nvim_get_current_buf() == status_buffer, "refresh created a duplicate status buffer")
+
+vim.fn.search("tracked.txt")
+local open_mapping = vim.fn.maparg("<CR>", "n", false, true)
+assert(open_mapping.callback, "open mapping was not registered")
+open_mapping.callback()
+vim.wait(2000, function()
+  return vim.api.nvim_buf_get_name(0):find("tracked.txt", 1, true) ~= nil
+end)
+assert(vim.api.nvim_buf_get_name(0):find("tracked.txt", 1, true), "open action did not enter the file view")
+local back_mapping = vim.fn.maparg("<C-O>", "n", false, true)
+assert(back_mapping.callback, "back mapping was not registered")
+back_mapping.callback()
+vim.wait(2000, function()
+  return vim.api.nvim_get_current_buf() == status_buffer
+end)
+assert(vim.api.nvim_get_current_buf() == status_buffer, "Ctrl-O did not return to the status view")
+local forward_mapping = vim.fn.maparg("<C-S-I>", "n", false, true)
+assert(forward_mapping.callback, "forward mapping was not registered")
+forward_mapping.callback()
+vim.wait(2000, function()
+  return vim.api.nvim_get_current_buf() ~= status_buffer
+end)
+assert(vim.api.nvim_buf_get_name(0):find("tracked.txt", 1, true), "Ctrl-Shift-I did not return to the file view")
 
 vim.cmd("Git status")
 vim.wait(5000, function()

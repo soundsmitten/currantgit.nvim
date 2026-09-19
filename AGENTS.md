@@ -77,6 +77,8 @@ Update this map when a directory becomes real.
     agents.
 12. For every user-facing mapping or action, add a clean headless interaction
     assertion. Command coverage alone is not interaction coverage.
+13. Keep `doc/currantgit.txt` current for public CurrantGit behavior. Document
+    plugin-specific semantics and boundaries; defer generic Vim help to Vim.
 
 ## Validation
 

@@ -1,6 +1,7 @@
 local M = {}
 local config = require("currantgit.config")
 local actions = require("currantgit.actions")
+local navigation = require("currantgit.navigation")
 
 local state = {
   configured = false,
@@ -86,7 +87,9 @@ local function action_context(buffer)
       open_status()
     end,
     open = function(item)
+      navigation.update(0)
       vim.cmd("edit " .. vim.fn.fnameescape(root .. "/" .. item.path))
+      navigation.visit(0)
     end,
     diff = function(item)
       M.git({ "diff", "--", item.path })
@@ -103,6 +106,7 @@ local function dispatch_current(buffer, id)
 end
 
 local function attach_status(buffer)
+  navigation.visit(0)
   local map = function(mode, lhs, rhs)
     vim.keymap.set(mode, lhs, rhs, { buffer = buffer, silent = true, desc = "CurrantGit" })
   end
@@ -130,7 +134,7 @@ local function set_buffer(lines, items, title, line_items, root)
   end
   vim.api.nvim_set_current_buf(buffer)
   vim.bo[buffer].buftype = "nofile"
-  vim.bo[buffer].bufhidden = "wipe"
+  vim.bo[buffer].bufhidden = "hide"
   vim.bo[buffer].modifiable = true
   vim.bo[buffer].filetype = "currantgit"
   set_modifiable(buffer, function()
