@@ -19,7 +19,9 @@ local open_deleted
 local open_blame
 local open_activity
 local open_commit
+local open_diff_args
 local set_buffer
+local attach_diff
 
 local function schedule(callback)
   vim.schedule(function()
@@ -42,12 +44,18 @@ local function record_command(args, cwd, result, started)
   }
 end
 
-local function execute(args, opts, callback)
+local function execute(args, opts, callback, input)
   local started = vim.loop.hrtime()
-  vim.system(args, opts, function(result)
+  local process_opts = vim.deepcopy(opts)
+  if input then process_opts.stdin = true end
+  local process = vim.system(args, process_opts, function(result)
     record_command(args, opts.cwd, result, started)
     callback(result)
   end)
+  if input then
+    process:write(input)
+    process:write(nil)
+  end
 end
 
 local function split_args(args)
@@ -111,7 +119,7 @@ end
 
 local function action_context(buffer)
   local root = vim.b[buffer].currantgit_root
-  local function action(args, callback)
+  local function action(args, callback, input)
     local result_root, error_message = repository_root()
     if not result_root then
       vim.notify("CurrantGit: " .. error_message, vim.log.levels.ERROR)
@@ -128,7 +136,14 @@ local function action_context(buffer)
         end
         callback()
       end)
-    end)
+    end, input)
+  end
+  local function apply_hunk(item, args, callback)
+    if type(item.patch) ~= "string" or item.patch == "" then
+      vim.notify("CurrantGit: hunk has no applyable patch", vim.log.levels.ERROR)
+      return
+    end
+    action(args, callback, item.patch)
   end
   return {
     buffer = buffer,
@@ -156,6 +171,16 @@ local function action_context(buffer)
     end,
     unstage = function(item)
       action({ "restore", "--staged", "--", item.path }, open_status)
+    end,
+    stage_hunk = function(item)
+      apply_hunk(item, { "apply", "--cached", "--unidiff-zero" }, function()
+        open_diff_args(vim.b[buffer].currantgit_diff_args)
+      end)
+    end,
+    unstage_hunk = function(item)
+      apply_hunk(item, { "apply", "--cached", "--unidiff-zero", "--reverse" }, function()
+        open_diff_args(vim.b[buffer].currantgit_diff_args)
+      end)
     end,
     discard = function(item)
       vim.ui.select({ "Discard", "Cancel" }, {
@@ -323,6 +348,15 @@ local function attach_status(buffer)
   update_discovery(buffer)
 end
 
+attach_diff = function(buffer)
+  vim.keymap.set("n", "s", function() dispatch_current(buffer, "hunk.stage") end, {
+    buffer = buffer, silent = true, desc = "Stage diff hunk",
+  })
+  vim.keymap.set("n", "u", function() dispatch_current(buffer, "hunk.unstage") end, {
+    buffer = buffer, silent = true, desc = "Unstage diff hunk",
+  })
+end
+
 set_buffer = function(lines, items, title, line_items, root, fold_levels)
   local name = "currantgit://" .. title
   local buffer = vim.fn.bufnr(name)
@@ -353,11 +387,11 @@ set_buffer = function(lines, items, title, line_items, root, fold_levels)
   end
   if title == "status" then
     attach_status(buffer)
+  elseif title == "diff" then
+    attach_diff(buffer)
   end
   return buffer
 end
-
-local open_diff_args
 
 open_diff_args = function(args)
   local root, error_message = repository_root()
@@ -374,10 +408,16 @@ open_diff_args = function(args)
         vim.notify("CurrantGit: " .. (result.stderr or "git diff failed"), vim.log.levels.ERROR)
         return
       end
-      local lines, fold_levels, line_items, hunks = diff.parse(result.stdout or "")
+      local mode = vim.tbl_contains(args, "--cached") and "staged" or "working"
+      local path
+      for index, arg in ipairs(args) do
+        if arg == "--" then path = args[index + 1] end
+      end
+      local lines, fold_levels, line_items, hunks = diff.parse(result.stdout or "", { mode = mode, path = path })
       navigation.update(0)
       set_buffer(lines, hunks, "diff", line_items, root, fold_levels)
       vim.b.currantgit_diff_hunks = hunks
+      vim.b.currantgit_diff_args = args
       navigation.visit(0)
     end)
   end)
@@ -642,6 +682,32 @@ function M.setup(opts)
     end,
     run = function(context, item)
       context.discard(item)
+      return true
+    end,
+  })
+  actions.register({
+    id = "hunk.stage",
+    label = "stage hunk",
+    key = "s",
+    applies_to = { "hunk" },
+    is_available = function(_, item)
+      return item.mode == "working"
+    end,
+    run = function(context, item)
+      context.stage_hunk(item)
+      return true
+    end,
+  })
+  actions.register({
+    id = "hunk.unstage",
+    label = "unstage hunk",
+    key = "u",
+    applies_to = { "hunk" },
+    is_available = function(_, item)
+      return item.mode == "staged"
+    end,
+    run = function(context, item)
+      context.unstage_hunk(item)
       return true
     end,
   })

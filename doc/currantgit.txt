@@ -62,7 +62,12 @@ Both projections are contextual to the item under the cursor.
 The diff action opens a read-only diff surface. Hunk headers are native fold
 roots, so |fold-commands| can collapse or reopen each hunk.
 Each hunk is also a stable semantic item with source ranges and collapse,
-stage, and unstage capabilities for later hunk actions.
+stage, and unstage capabilities. On a working diff, `s` stages the current
+hunk. On a staged diff, `u` unstages the current hunk. These actions send the
+exact hunk patch to Git through stdin; they do not construct shell commands
+from rendered text. A successful mutation refreshes the same diff projection.
+If Git rejects the patch, CurrantGit reports the failure and leaves the
+projection and repository state untouched.
 
 On a deleted item, <CR> opens the last available Git revision in a read-only
 `currantgit://deleted/...` buffer. CurrantGit does not create an empty buffer
