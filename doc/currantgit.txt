@@ -50,6 +50,9 @@ g?                      Show the available status actions.
 The discovery line is generated from the same action metadata as the mappings.
 It is a hint, not a second keymap definition.
 
+The diff action opens a read-only diff surface. Hunk headers are native fold
+roots, so |fold-commands| can collapse or reopen each hunk.
+
 ===============================================================================
 CONFIGURATION                                           *currantgit-configuration*
 

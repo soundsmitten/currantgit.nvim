@@ -1,6 +1,7 @@
 local M = {}
 local config = require("currantgit.config")
 local actions = require("currantgit.actions")
+local diff = require("currantgit.diff")
 local navigation = require("currantgit.navigation")
 
 local state = {
@@ -10,6 +11,7 @@ local state = {
 }
 
 local open_status
+local open_diff
 
 local function schedule(callback)
   vim.schedule(function()
@@ -111,7 +113,7 @@ local function action_context(buffer)
       navigation.visit(0)
     end,
     diff = function(item)
-      M.git({ "diff", "--", item.path })
+      open_diff(item)
     end,
     stage = function(item)
       action({ "add", "--", item.path }, open_status)
@@ -175,7 +177,7 @@ local function set_buffer(lines, items, title, line_items, root, fold_levels)
   vim.bo[buffer].buftype = "nofile"
   vim.bo[buffer].bufhidden = "hide"
   vim.bo[buffer].modifiable = true
-  vim.bo[buffer].filetype = "currantgit"
+  vim.bo[buffer].filetype = title == "diff" and "diff" or "currantgit"
   set_modifiable(buffer, function()
     vim.api.nvim_buf_set_lines(buffer, 0, -1, false, lines)
   end)
@@ -186,8 +188,8 @@ local function set_buffer(lines, items, title, line_items, root, fold_levels)
   vim.b[buffer].currantgit_fold_levels = fold_levels or {}
   vim.b[buffer].currantgit_root = root
   vim.b[buffer].currantgit_title = title
-  vim.wo.foldmethod = title == "status" and "expr" or "manual"
-  if title == "status" then
+  vim.wo.foldmethod = (title == "status" or title == "diff") and "expr" or "manual"
+  if title == "status" or title == "diff" then
     vim.wo.foldexpr = "v:lua.require'currantgit'.foldexpr(v:lnum)"
     vim.wo.foldlevel = 99
     vim.wo.foldenable = true
@@ -196,6 +198,29 @@ local function set_buffer(lines, items, title, line_items, root, fold_levels)
     attach_status(buffer)
   end
   return buffer
+end
+
+open_diff = function(item)
+  local root, error_message = repository_root()
+  if not root then
+    vim.notify("CurrantGit: " .. error_message, vim.log.levels.ERROR)
+    return
+  end
+  vim.system({ git_command(), "diff", "--", item.path }, {
+    cwd = root,
+    text = true,
+  }, function(result)
+    schedule(function()
+      if result.code ~= 0 then
+        vim.notify("CurrantGit: " .. (result.stderr or "git diff failed"), vim.log.levels.ERROR)
+        return
+      end
+      local lines, fold_levels = diff.parse(result.stdout or "")
+      navigation.update(0)
+      set_buffer(lines, {}, "diff", {}, root, fold_levels)
+      navigation.visit(0)
+    end)
+  end)
 end
 
 local function parse_status(stdout)
