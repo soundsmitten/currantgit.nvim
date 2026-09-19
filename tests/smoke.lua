@@ -37,7 +37,7 @@ local lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
 assert(not lines[1]:find("CurrantGit", 1, true), "default status header should not contain the plugin name")
 assert_contains(lines, "Changes")
 assert(vim.b.currantgit_items, "status surface did not expose semantic items")
-assert(#vim.b.currantgit_items >= 4, "fixture should expose staged, modified, discard, and untracked items")
+assert(#vim.b.currantgit_items >= 5, "fixture should expose staged, modified, discard, deleted, and untracked items")
 assert(vim.wo.foldmethod == "expr", "status surface should use native expression folds")
 assert(#vim.b.currantgit_sections == 3, "fixture should expose staged, unstaged, and untracked sections")
 
@@ -200,6 +200,21 @@ for _, item in ipairs(vim.b.currantgit_items) do
   if item.path == "discard.txt" then discarded_item = item end
 end
 assert(not discarded_item, "confirmed discard should remove the item from status")
+
+vim.cmd("Git status")
+vim.wait(5000, function()
+  return vim.bo.filetype == "currantgit" and vim.b.currantgit_title == "status"
+end)
+goto_item("deleted.txt")
+local deleted_open_mapping = vim.fn.maparg("<CR>", "n", false, true)
+assert(deleted_open_mapping.callback, "deleted-file open mapping was not registered")
+deleted_open_mapping.callback()
+vim.wait(5000, function()
+  return vim.api.nvim_buf_get_name(0):find("currantgit://deleted/deleted.txt", 1, true) ~= nil
+end)
+assert(vim.api.nvim_buf_get_name(0):find("currantgit://deleted/deleted.txt", 1, true), "deleted file did not open a historical view")
+assert_contains(vim.api.nvim_buf_get_lines(0, 0, -1, false), "gone")
+assert(vim.bo.readonly, "deleted historical view should be read-only")
 
 print("CurrantGit smoke: ok")
 vim.cmd("qa!")

@@ -38,7 +38,8 @@ available actions remain attached to the item below the heading.
 
 On a change item:
 
-<CR>                    Open the file.
+<CR>                    Open the file. Deleted files open their last
+                        available Git revision read-only.
 d                       Show the file diff.
 s                       Stage the file.
 u                       Unstage the file.
