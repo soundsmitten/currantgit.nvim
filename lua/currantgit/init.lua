@@ -80,6 +80,25 @@ end
 
 local function action_context(buffer)
   local root = vim.b[buffer].currantgit_root
+  local function action(args, callback)
+    local result_root, error_message = repository_root()
+    if not result_root then
+      vim.notify("CurrantGit: " .. error_message, vim.log.levels.ERROR)
+      return
+    end
+    vim.system(vim.list_extend({ git_command() }, args), {
+      cwd = result_root,
+      text = true,
+    }, function(result)
+      schedule(function()
+        if result.code ~= 0 then
+          vim.notify("CurrantGit: " .. (result.stderr or "git action failed"), vim.log.levels.ERROR)
+          return
+        end
+        callback()
+      end)
+    end)
+  end
   return {
     buffer = buffer,
     root = root,
@@ -93,6 +112,12 @@ local function action_context(buffer)
     end,
     diff = function(item)
       M.git({ "diff", "--", item.path })
+    end,
+    stage = function(item)
+      action({ "add", "--", item.path }, open_status)
+    end,
+    unstage = function(item)
+      action({ "restore", "--staged", "--", item.path }, open_status)
     end,
   }
 end
@@ -112,6 +137,9 @@ local function attach_status(buffer)
   end
   map("n", "<CR>", function() dispatch_current(buffer, "item.open") end)
   map("n", "d", function() dispatch_current(buffer, "item.diff") end)
+  map("n", "s", function() dispatch_current(buffer, "item.stage") end)
+  map("n", "u", function() dispatch_current(buffer, "item.unstage") end)
+  map("n", "-", function() dispatch_current(buffer, "item.toggle") end)
   map("n", "r", function() dispatch_current(buffer, "surface.refresh") end)
   map("n", "g?", function() dispatch_current(buffer, "surface.help") end)
   local group = vim.api.nvim_create_augroup("CurrantGitStatus" .. buffer, { clear = true })
@@ -235,7 +263,7 @@ local function parse_status(stdout)
       section_nodes[#section_nodes + 1] = node
       lines[#lines + 1] = string.format("%s (%d)", section.label, #section.items)
       line_items[#lines] = node
-      fold_levels[#lines] = 1
+      fold_levels[#lines] = ">1"
       for _, item in ipairs(section.items) do
         lines[#lines + 1] = string.format("  %s  %s", ui.icons[item.change_kind] or item.status, item.path)
         line_items[#lines] = item
@@ -248,7 +276,7 @@ local function parse_status(stdout)
     fold_levels[#lines] = 0
   end
   lines[#lines + 1] = ""
-  fold_levels[#lines] = 0
+  fold_levels[#lines] = "<1"
   lines[#lines + 1] = ""
   fold_levels[#lines] = 0
   return lines, items, line_items, fold_levels, section_nodes
@@ -322,11 +350,51 @@ function M.setup(opts)
     end,
   })
   actions.register({
+    id = "item.stage",
+    label = "stage",
+    key = "s",
+    applies_to = { "change" },
+    is_available = function(_, item)
+      return item.status == "??" or item.status:sub(2, 2) ~= " "
+    end,
+    run = function(context, item)
+      context.stage(item)
+      return true
+    end,
+  })
+  actions.register({
+    id = "item.unstage",
+    label = "unstage",
+    key = "u",
+    applies_to = { "change" },
+    is_available = function(_, item)
+      return item.status ~= "??" and item.status:sub(1, 1) ~= " "
+    end,
+    run = function(context, item)
+      context.unstage(item)
+      return true
+    end,
+  })
+  actions.register({
+    id = "item.toggle",
+    label = "toggle staged",
+    key = "-",
+    applies_to = { "change" },
+    run = function(context, item)
+      if item.status ~= "??" and item.status:sub(1, 1) ~= " " then
+        context.unstage(item)
+      else
+        context.stage(item)
+      end
+      return true
+    end,
+  })
+  actions.register({
     id = "surface.help",
     label = "help",
     key = "g?",
     run = function()
-      vim.notify("CurrantGit: <CR> open   d diff   r refresh", vim.log.levels.INFO)
+      vim.notify("CurrantGit: <CR> open   d diff   s stage   u unstage   - toggle   r refresh", vim.log.levels.INFO)
       return true
     end,
   })

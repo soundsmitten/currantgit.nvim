@@ -40,6 +40,9 @@ On a change item:
 
 <CR>                    Open the file.
 d                       Show the file diff.
+s                       Stage the file.
+u                       Unstage the file.
+-                       Toggle the file's staged state.
 r                       Refresh the status surface.
 g?                      Show the available status actions.
 

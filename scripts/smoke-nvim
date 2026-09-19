@@ -14,6 +14,8 @@ git -C "$fixture" add tracked.txt
 git -C "$fixture" commit -q -m "fixture base"
 printf 'one\nchanged\n' > "$fixture/tracked.txt"
 printf 'untracked\n' > "$fixture/untracked.txt"
+printf 'staged\n' > "$fixture/staged.txt"
+git -C "$fixture" add staged.txt
 
 CURRANTGIT_ROOT="$repo_root" \
   XDG_CONFIG_HOME="$nvim_home/config" \
