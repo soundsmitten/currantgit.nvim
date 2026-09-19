@@ -11,6 +11,7 @@ required_files=(
   docs/CurrantGit-PRD.md
   docs/architecture.md
   docs/development.md
+  doc/currantgit.txt
 )
 
 for file in "${required_files[@]}"; do

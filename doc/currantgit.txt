@@ -1,0 +1,79 @@
+*currantgit.txt*  CurrantGit — Git surfaces that still feel like Neovim
+
+===============================================================================
+CONTENTS                                                     *currantgit-contents*
+
+COMMANDS                                                        |:Git|
+STATUS                                                   *currantgit-status*
+CONFIGURATION                                       *currantgit-configuration*
+NAVIGATION                                           *currantgit-navigation*
+ACTIONS                                                     *currantgit-actions*
+
+===============================================================================
+COMMANDS                                                        *currantgit-commands*
+
+:Git                                                            *:Git*
+                        With no arguments, open the repository status surface
+                        for the current working directory.
+
+:Git status               Open or refresh the status surface.
+:Git {args}               Run an arbitrary Git command and display its output
+                          in a CurrantGit command surface.
+
+The command surface is intentionally small in the bootstrap implementation.
+`:Git` remains the escape hatch for commands that do not yet have a dedicated
+item action.
+
+===============================================================================
+STATUS                                                          *currantgit-status*
+
+The status surface is buffer-native and read-only. It exposes semantic change
+items rather than making rendered lines the source of truth.
+
+On a change item:
+
+<CR>                    Open the file.
+d                       Show the file diff.
+r                       Refresh the status surface.
+g?                      Show the available status actions.
+
+The discovery line is generated from the same action metadata as the mappings.
+It is a hint, not a second keymap definition.
+
+===============================================================================
+CONFIGURATION                                           *currantgit-configuration*
+
+                                                        *currantgit-setup*
+require('currantgit').setup({})
+
+Configuration is optional. Defaults are intentionally useful. The public
+options are documented in the project README and should describe product
+behavior rather than renderer internals.
+
+===============================================================================
+NAVIGATION                                               *currantgit-navigation*
+
+CurrantGit-managed views use the regular Neovim navigation keys for local view
+history:
+
+CTRL-O                  Move back through CurrantGit view history.
+CTRL-SHIFT-I            Move forward through CurrantGit view history.
+
+The view history preserves the buffer, cursor, and window view. When the local
+CurrantGit history is exhausted, the key falls through to normal Neovim jump
+navigation. CurrantGit does not globally redefine these keys.
+
+This documents CurrantGit’s boundary behavior; see |:help jump-motions| for
+Neovim’s underlying navigation semantics.
+
+===============================================================================
+ACTIONS                                                     *currantgit-actions*
+
+Actions are capabilities of semantic items. Mappings, discovery text, and
+future WhichKey integration are projections of the same action metadata.
+
+An action may be available for a change, hunk, commit, blame line, person, or
+another item kind. Extensions should target stable item IDs and capabilities,
+not rendered line numbers.
+
+ vim:tw=78:ts=8:sw=8:et:ft=help:norl:

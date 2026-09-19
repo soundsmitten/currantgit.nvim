@@ -126,6 +126,11 @@ The harness must exercise mapped actions, not only the functions beneath them.
 Async callback errors are collected and asserted as test failures. A green
 command-level test is insufficient if pressing the actual key can still fail.
 
+Help is part of the same loop. Add or update `doc/currantgit.txt` when a public
+command, action, configuration option, or CurrantGit-specific interaction
+changes. Do not duplicate obvious built-in Vim behavior; document the local
+extension and its boundary with the editor instead.
+
 Configuration follows the same discipline: defaults should be useful, options
 should be few, and every documented option should affect observable behavior.
 Do not expose an option merely to avoid choosing a default.
