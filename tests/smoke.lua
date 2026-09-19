@@ -37,7 +37,7 @@ local lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
 assert(not lines[1]:find("CurrantGit", 1, true), "default status header should not contain the plugin name")
 assert_contains(lines, "Changes")
 assert(vim.b.currantgit_items, "status surface did not expose semantic items")
-assert(#vim.b.currantgit_items >= 3, "fixture should expose staged, modified, and untracked items")
+assert(#vim.b.currantgit_items >= 4, "fixture should expose staged, modified, discard, and untracked items")
 assert(vim.wo.foldmethod == "expr", "status surface should use native expression folds")
 assert(#vim.b.currantgit_sections == 3, "fixture should expose staged, unstaged, and untracked sections")
 
@@ -60,6 +60,7 @@ assert(action_ids["item.open"], "change item is missing the open action")
 assert(action_ids["item.diff"], "change item is missing the diff action")
 assert(action_ids["item.stage"], "unstaged change is missing the stage action")
 assert(action_ids["item.toggle"], "change is missing the toggle action")
+assert(action_ids["item.discard"], "unstaged change is missing the discard action")
 assert(not action_ids["item.unstage"], "unstaged change should not expose unstage")
 assert(action_ids["surface.refresh"], "surface is missing the refresh action")
 assert_contains(vim.api.nvim_buf_get_lines(0, -2, -1, false), "Actions:")
@@ -139,6 +140,38 @@ vim.wait(5000, function()
 end)
 assert_no_async_errors()
 assert(vim.b.currantgit_title == "status", ":Git status did not use the status projection")
+
+goto_item("discard.txt")
+local discard_mapping = vim.fn.maparg("X", "n", false, true)
+assert(discard_mapping.callback, "discard mapping was not registered")
+local original_select = vim.ui.select
+vim.ui.select = function(items, _, callback)
+  callback(items[2], 2)
+end
+discard_mapping.callback()
+vim.wait(500, function() return false end)
+local cancelled_item
+for _, item in ipairs(vim.b.currantgit_items) do
+  if item.path == "discard.txt" then cancelled_item = item end
+end
+assert(cancelled_item, "cancelled discard should preserve the item")
+
+vim.ui.select = function(items, _, callback)
+  callback(items[1], 1)
+end
+discard_mapping.callback()
+vim.wait(5000, function()
+  for _, item in ipairs(vim.b.currantgit_items or {}) do
+    if item.path == "discard.txt" then return false end
+  end
+  return true
+end)
+vim.ui.select = original_select
+local discarded_item
+for _, item in ipairs(vim.b.currantgit_items) do
+  if item.path == "discard.txt" then discarded_item = item end
+end
+assert(not discarded_item, "confirmed discard should remove the item from status")
 
 print("CurrantGit smoke: ok")
 vim.cmd("qa!")

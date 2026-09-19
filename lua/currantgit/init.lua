@@ -119,6 +119,16 @@ local function action_context(buffer)
     unstage = function(item)
       action({ "restore", "--staged", "--", item.path }, open_status)
     end,
+    discard = function(item)
+      vim.ui.select({ "Discard", "Cancel" }, {
+        prompt = "Discard working-tree changes to " .. item.path .. "?",
+      }, function(choice)
+        if choice ~= "Discard" then
+          return
+        end
+        action({ "restore", "--worktree", "--", item.path }, open_status)
+      end)
+    end,
   }
 end
 
@@ -140,6 +150,7 @@ local function attach_status(buffer)
   map("n", "s", function() dispatch_current(buffer, "item.stage") end)
   map("n", "u", function() dispatch_current(buffer, "item.unstage") end)
   map("n", "-", function() dispatch_current(buffer, "item.toggle") end)
+  map("n", "X", function() dispatch_current(buffer, "item.discard") end)
   map("n", "r", function() dispatch_current(buffer, "surface.refresh") end)
   map("n", "g?", function() dispatch_current(buffer, "surface.help") end)
   local group = vim.api.nvim_create_augroup("CurrantGitStatus" .. buffer, { clear = true })
@@ -390,11 +401,24 @@ function M.setup(opts)
     end,
   })
   actions.register({
+    id = "item.discard",
+    label = "discard",
+    key = "X",
+    applies_to = { "change" },
+    is_available = function(_, item)
+      return item.status ~= "??" and item.status:sub(2, 2) ~= " "
+    end,
+    run = function(context, item)
+      context.discard(item)
+      return true
+    end,
+  })
+  actions.register({
     id = "surface.help",
     label = "help",
     key = "g?",
     run = function()
-      vim.notify("CurrantGit: <CR> open   d diff   s stage   u unstage   - toggle   r refresh", vim.log.levels.INFO)
+      vim.notify("CurrantGit: <CR> open   d diff   s stage   u unstage   - toggle   X discard   r refresh", vim.log.levels.INFO)
       return true
     end,
   })
