@@ -10,9 +10,12 @@ git -C "$fixture" init -q
 git -C "$fixture" config user.name "CurrantGit Harness"
 git -C "$fixture" config user.email "harness@currantgit.invalid"
 printf 'one\ntwo\n' > "$fixture/tracked.txt"
+printf 'keep\n' > "$fixture/discard.txt"
 git -C "$fixture" add tracked.txt
+git -C "$fixture" add discard.txt
 git -C "$fixture" commit -q -m "fixture base"
 printf 'one\nchanged\n' > "$fixture/tracked.txt"
+printf 'throw this away\n' > "$fixture/discard.txt"
 printf 'untracked\n' > "$fixture/untracked.txt"
 printf 'staged\n' > "$fixture/staged.txt"
 git -C "$fixture" add staged.txt
