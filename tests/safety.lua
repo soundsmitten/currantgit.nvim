@@ -822,19 +822,38 @@ local function test_unusual_paths_end_to_end()
 
     open_status_and_wait()
     goto_item(path)
+    -- Wait for CurrantGit's own post-action refresh (filetype + changedtick),
+    -- not just real Git state: stage/unstage's callback fires its own
+    -- internal `open_status` (another real `git status` subprocess) after
+    -- the mutation. `git status` can briefly touch `index.lock` too (index
+    -- stat-cache refresh), so proceeding to the next mutating action (on the
+    -- same repo, from the next loop iteration or the very next step) while
+    -- that trailing refresh is still in flight reproduces exactly the
+    -- `.git/index.lock` collision documented as Finding 7 in
+    -- docs/audits/2026-09-19-git-safety-audit.md and docs/gotchas.md.
+    local stage_before_buffer = vim.api.nvim_get_current_buf()
+    local stage_before_tick = vim.api.nvim_buf_get_changedtick(stage_before_buffer)
     local stage_mapping = vim.fn.maparg("s", "n", false, true)
     stage_mapping.callback()
     assert(vim.wait(8000, function()
       local staged = changed_paths({ "diff", "--cached", "--name-only" }, repo)
       return vim.tbl_contains(staged, path)
+        and vim.bo.filetype == "currantgit"
+        and (vim.api.nvim_get_current_buf() ~= stage_before_buffer
+          or vim.api.nvim_buf_get_changedtick(stage_before_buffer) > stage_before_tick)
     end, 50), "stage did not settle for " .. path)
 
     open_status_and_wait()
     goto_item(path)
+    local unstage_before_buffer = vim.api.nvim_get_current_buf()
+    local unstage_before_tick = vim.api.nvim_buf_get_changedtick(unstage_before_buffer)
     local unstage_mapping = vim.fn.maparg("u", "n", false, true)
     unstage_mapping.callback()
     assert(vim.wait(8000, function()
       return not vim.tbl_contains(changed_paths({ "diff", "--cached", "--name-only" }, repo), path)
+        and vim.bo.filetype == "currantgit"
+        and (vim.api.nvim_get_current_buf() ~= unstage_before_buffer
+          or vim.api.nvim_buf_get_changedtick(unstage_before_buffer) > unstage_before_tick)
     end, 50), "unstage did not settle for " .. path)
     local unstaged = changed_paths({ "diff", "--name-only" }, repo)
     assert(vim.tbl_contains(unstaged, path), "the file should be back to unstaged-modified")
