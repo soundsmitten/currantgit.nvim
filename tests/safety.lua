@@ -1089,6 +1089,44 @@ local function test_submodule()
   vim.fn.delete(submodule_source, "rf")
 end
 
+-- 20. `unquote_diff_path`'s C-style control-character escapes (found in PR
+-- review, PR #18): Git's diff-header quoting uses the full C string-literal
+-- escape set for control characters -- not just `\t`/`\n`/`\"`/`\\`, but
+-- also `\a` (bell), `\b` (backspace), `\f` (form feed), `\r` (carriage
+-- return), and `\v` (vertical tab). Verified empirically against real Git
+-- for all of them. The original fallback for an unrecognized single-char
+-- escape silently dropped the backslash and kept the letter, so `\r`
+-- (carriage return) decoded to the literal letter `r` instead of a CR byte
+-- -- corrupting `hunk.path` for a real, valid filename, exactly the
+-- "reasoned about, not exercised end-to-end" gap this PR was supposed to
+-- close. Combines a leading dash, a unicode byte, and a literal CR in one
+-- filename (the reviewer's exact repro) to also confirm octal-decoding and
+-- named-escape-decoding compose correctly in the same quoted path.
+local function test_diff_unquote_full_control_escape_set()
+  local diff = require("currantgit.diff")
+  local repo = make_repo()
+  local name = "-caf\xc3\xa9\rdragon.txt"
+  write_file(repo .. "/" .. name, "one\n")
+  git({ "add", "." }, repo)
+  git({ "commit", "-q", "-m", "base" }, repo)
+  write_file(repo .. "/" .. name, "one\ntwo\n")
+
+  local result = vim.system(
+    { "git", "diff", "--no-color", "--", ":(literal)" .. name },
+    { cwd = repo, text = true }
+  ):wait()
+  assert(result.code == 0, result.stderr)
+  assert(result.stdout:find('\\303\\251', 1, true), "fixture diff should contain the octal-escaped unicode byte")
+  assert(result.stdout:find("\\r", 1, true), "fixture diff should contain the named \\r escape, not a raw CR")
+
+  local _, _, _, hunks = diff.parse(result.stdout, { mode = "working", path = name })
+  assert(#hunks == 1, "expected exactly one hunk")
+  assert(hunks[1].path == name,
+    "hunk.path must be the real filename (including the raw CR byte), got: " .. vim.inspect(hunks[1].path))
+
+  vim.fn.delete(repo, "rf")
+end
+
 test_cwd_race()
 test_glob_pathspec()
 test_blame_multiline()
@@ -1108,5 +1146,6 @@ test_diff_multi_pathspec_hunk_paths()
 test_open_deleted_colon_in_filename()
 test_linked_worktree()
 test_submodule()
+test_diff_unquote_full_control_escape_set()
 assert(#currantgit.errors() == 0, table.concat(currantgit.errors(), "\n"))
 print("CurrantGit safety: ok")

@@ -62,14 +62,33 @@ before being passed to `diff.parse`, so it can never leak CurrantGit's own
 pathspec-magic prefix into `hunk.path` even in that dead-code path.
 
 This is not a full shell/C-string unescaper — it handles exactly the escape
-forms `core.quotePath` documents (`\t`, `\n`, `\\`, `\"`, `\ooo`), matching
-the scope of the existing `-z` status-parsing fix (decision 0004) rather
-than reimplementing general C string literal parsing.
+forms `core.quotePath` documents, matching the scope of the existing `-z`
+status-parsing fix (decision 0004) rather than reimplementing general C
+string literal parsing.
+
+**Amendment (2026-09-20, found in PR #18 code review):** the first version
+of this fix only special-cased `\t`, `\n`, `\"`, `\\` in the named-escape
+table — exactly the escapes that version's own test fixtures happened to
+exercise, not the complete set Git actually emits. An independent reviewer
+reproduced a real corruption against a fixture combining a leading dash, a
+UTF-8 byte, and a literal carriage return: Git quotes CR as the named escape
+`\r`, and the original fallback for any unrecognized single-char escape
+silently dropped the backslash and returned the bare letter — decoding `\r`
+to the literal letter `r` instead of a CR byte. Verified empirically against
+real Git that the complete named single-char escape set is `\a` (bell),
+`\b` (backspace), `\f` (form feed), `\n`, `\r`, `\t`, `\v` (vertical tab),
+plus `\"` and `\\` — the full C string-literal control-character set, not
+an arbitrary subset. The named-escape table now covers all of them; a
+control byte with no named escape still correctly falls back to the
+existing 3-digit octal decoding. See
+[`gotchas.md`](../gotchas.md) for the standing note this produced.
 
 Regression coverage: `tests/safety.lua`, `test_unusual_paths_end_to_end`
 (diff, stage, unstage, blame, and discard against all three filenames,
 asserting `hunk.path` is exactly the real filename for the quoted and
-tab-suffixed cases).
+tab-suffixed cases), and `test_diff_unquote_full_control_escape_set` (added
+for the amendment: the reviewer's exact leading-dash/unicode/CR repro,
+fed through `diff.parse` from real captured Git output).
 
 ## Consequences
 

@@ -25,12 +25,23 @@ local function unquote_diff_path(text)
   body = body:gsub("\\([0-7][0-7][0-7])", function(octal)
     return string.char(tonumber(octal, 8))
   end)
+  -- The full C string-literal control-character escape set Git's quoting
+  -- uses (verified empirically against real Git for every named escape
+  -- below, not just the ones an initial pass happened to test): `\a`
+  -- (bell), `\b` (backspace), `\f` (form feed), `\n`, `\r` (carriage
+  -- return), `\t`, `\v` (vertical tab), plus `\"` and `\\`. A control byte
+  -- with no named escape (e.g. 0x01) falls back to the 3-digit octal form
+  -- already handled above. Anything else falling through this table would
+  -- previously have dropped the backslash and kept the bare letter --
+  -- e.g. `\r` silently decoding to the literal letter `r` -- corrupting a
+  -- real, valid filename. Found in code review (PR #18) against a fixture
+  -- combining a leading dash, a unicode byte, and a literal CR.
+  local named_escapes = {
+    a = "\a", b = "\b", f = "\f", n = "\n", r = "\r", t = "\t", v = "\v",
+    ['"'] = '"', ["\\"] = "\\",
+  }
   body = body:gsub("\\(.)", function(escaped)
-    if escaped == "t" then return "\t"
-    elseif escaped == "n" then return "\n"
-    elseif escaped == '"' then return '"'
-    elseif escaped == "\\" then return "\\"
-    else return escaped end
+    return named_escapes[escaped] or escaped
   end)
   return body
 end

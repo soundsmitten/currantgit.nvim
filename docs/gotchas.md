@@ -34,6 +34,20 @@ these, see [`decisions/`](decisions/).
   transformations, not assume the text after `b/` is the literal filename.
   See [`decisions/0011`](decisions/0011-unusual-path-diff-header-parsing.md).
 
+- **Git's C-quoting of "unusual" path bytes uses the FULL C string-literal
+  control-character escape set, not just `\t`/`\n`.** Verified empirically
+  against real Git for every one of: `\a` (bell), `\b` (backspace), `\f`
+  (form feed), `\n`, `\r` (carriage return), `\t`, `\v` (vertical tab) — plus
+  `\"` and `\\`. A control byte with no named escape (e.g. 0x01) falls back
+  to the 3-digit octal form (`\001`). An unquoting implementation that only
+  special-cases the escapes its own test fixtures happened to exercise (a
+  real mistake made and caught by independent review — see
+  [`decisions/0011`](decisions/0011-unusual-path-diff-header-parsing.md)'s
+  revision) will silently mangle a filename containing one of the others:
+  `\r` decoding to the bare letter `r` instead of a carriage-return byte is
+  exactly the kind of corruption of a stable identity field
+  (`AGENTS.md` rule 6) this class of bug produces.
+
 - **`-z` output is unquoted; the human format is not.** By default
   (`core.quotePath=true`), `git status`/`git diff` C-quote and
   octal-escape filenames containing tabs, newlines, quotes, backslashes, or
