@@ -105,6 +105,20 @@ these, see [`decisions/`](decisions/).
   stage. See
   [`decisions/0010`](decisions/0010-hunk-apply-edge-cases-verified-safe.md).
 
+- **The bare `:<path>` object-specifier shorthand is ambiguous for a
+  filename that itself starts with a digit 0-3 followed by a colon.**
+  `git help gitrevisions`: `:[<n>:]<path>` optionally reads a leading stage
+  number (0-3) and a colon before the path. For a real file named
+  `2:file.txt`, `git show :2:file.txt` is parsed by Git itself as "stage 2,
+  path `file.txt`" — not "stage 0, path `2:file.txt`" — and fails with a
+  misleading "path does not exist" error. Use the explicit `:0:<path>` form
+  instead: Git only strips one stage-number prefix, not a repeated one, so
+  it resolves correctly even when the path itself starts with a
+  digit-colon sequence. The `<rev>:<path>` form (e.g. `HEAD:<path>`) has no
+  equivalent ambiguity — it takes everything after the first colon as the
+  path unconditionally, regardless of what the path itself contains. See
+  [`decisions/0012`](decisions/0012-open-deleted-explicit-index-stage.md).
+
 - **A multi-file diff's *last* file having no `@@` hunk** (binary, pure
   mode/chmod change, 100%-similarity rename, empty file add/delete) is a
   normal, valid diff shape, not an edge case. A parser that assumes the

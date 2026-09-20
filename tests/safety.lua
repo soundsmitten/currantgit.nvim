@@ -904,6 +904,49 @@ local function test_diff_multi_pathspec_hunk_paths()
   vim.fn.delete(repo, "rf")
 end
 
+-- 17. `open_deleted`'s `<rev>:<path>` colon ambiguity (audit continuation
+-- item 6): for a worktree-deleted-but-still-indexed file, `open_deleted`
+-- built the object specifier as the ambiguous shorthand `:<path>` (no
+-- explicit stage number). Per `git help gitrevisions`, `:[<n>:]<path>`
+-- optionally reads a leading stage number (0-3) followed by a colon before
+-- the path -- so for a real file whose name itself starts with a digit
+-- 0-3 followed by a colon (e.g. `2:file.txt`), `:2:file.txt` is misparsed
+-- by Git itself as "stage 2, path file.txt" instead of "stage 0, path
+-- 2:file.txt", and fails with a wrong, misleading error. The explicit
+-- `:0:<path>` form has no such ambiguity (verified: Git only strips one
+-- stage-number prefix, not a repeated one, so it works even when the path
+-- itself starts with a digit-colon sequence).
+local function test_open_deleted_colon_in_filename()
+  local repo = make_repo()
+  write_file(repo .. "/2:file.txt", "real content\n")
+  git({ "add", "." }, repo)
+  git({ "commit", "-q", "-m", "base" }, repo)
+  os.remove(repo .. "/2:file.txt")
+
+  vim.cmd("cd " .. vim.fn.fnameescape(repo))
+  open_status_and_wait()
+  goto_item("2:file.txt")
+  local item = vim.b.currantgit_line_items[vim.api.nvim_win_get_cursor(0)[1]]
+  assert(type(item) == "table" and item.change_kind == "deleted",
+    "expected a worktree-deleted item for 2:file.txt")
+
+  local before_buffer = vim.api.nvim_get_current_buf()
+  local before_tick = vim.api.nvim_buf_get_changedtick(before_buffer)
+  local open_mapping = vim.fn.maparg("<CR>", "n", false, true)
+  assert(open_mapping.callback, "open mapping was not registered")
+  open_mapping.callback()
+  assert(vim.wait(8000, function()
+    return vim.b.currantgit_title == "deleted"
+      and (vim.api.nvim_get_current_buf() ~= before_buffer
+        or vim.api.nvim_buf_get_changedtick(before_buffer) > before_tick)
+  end, 20), "opening a worktree-deleted file with a digit-colon name did not settle")
+  assert_contains(vim.api.nvim_buf_get_lines(0, 0, -1, false), "real content")
+  assert(#currantgit.errors() == 0, table.concat(currantgit.errors(), "\n"))
+
+  vim.cmd("cd " .. vim.fn.fnameescape(original_cwd))
+  vim.fn.delete(repo, "rf")
+end
+
 test_cwd_race()
 test_glob_pathspec()
 test_blame_multiline()
@@ -920,5 +963,6 @@ test_hunk_stage_atomic_on_conflict()
 test_hunk_stage_pinned_to_render_time_not_worktree()
 test_unusual_paths_end_to_end()
 test_diff_multi_pathspec_hunk_paths()
+test_open_deleted_colon_in_filename()
 assert(#currantgit.errors() == 0, table.concat(currantgit.errors(), "\n"))
 print("CurrantGit safety: ok")
