@@ -1,5 +1,13 @@
 # Git safety audit — continuation brief (2026-09-19)
 
+**Status:** Complete (2026-09-20, branch `codex/git-safety-audit-continuation`).
+All seven items below were investigated against real, disposable Git
+repositories. Three real bugs were found and fixed (items 1, 4/5 combined,
+and 6); the rest were independently verified already safe with no code
+change needed. See the main report's updated "Remaining dragons" and
+"Guarantees" sections and `docs/decisions/0008`–`0013` for the resolution of
+each item.
+
 This is a work order for continuing
 [`2026-09-19-git-safety-audit.md`](2026-09-19-git-safety-audit.md). Read that
 report first — it has the environment, method, and the seven findings
