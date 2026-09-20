@@ -62,11 +62,64 @@ local function execute(args, opts, callback, input)
   end
 end
 
+-- `command.args` (the Lua-callback equivalent of `<args>`, confirmed via
+-- `:help nvim_create_user_command()`) is the raw, unprocessed text typed
+-- after `:Git` -- Neovim does no quote-aware tokenization on it before this
+-- function ever sees it (that's what the *separate* `<q-args>`/`<f-args>`
+-- escape sequences are for, and neither is in play here). A naive
+-- whitespace-only split therefore breaks any argument containing spaces:
+-- `:Git commit -m "two words"` would become
+-- `{"commit", "-m", "\"two", "words\""}` instead of
+-- `{"commit", "-m", "two words"}`. This performs basic POSIX-shell-like word
+-- splitting instead: single quotes are literal, double quotes allow `\"`
+-- and `\\` escapes, and a bare backslash outside quotes escapes the next
+-- character. An unterminated quote is treated as malformed input and
+-- refused outright (Git safety doctrine: failure should be boring) rather
+-- than guessed at.
 local function split_args(args)
   if args == "" then
     return {}
   end
-  return vim.fn.split(args, [[\s\+]], true)
+  local result = {}
+  local current
+  local quote
+  local index = 1
+  local length = #args
+  while index <= length do
+    local char = args:sub(index, index)
+    if quote then
+      if char == quote then
+        quote = nil
+      elseif char == "\\" and quote == '"' and index < length
+        and (args:sub(index + 1, index + 1) == '"' or args:sub(index + 1, index + 1) == "\\") then
+        index = index + 1
+        current = (current or "") .. args:sub(index, index)
+      else
+        current = (current or "") .. char
+      end
+    elseif char == '"' or char == "'" then
+      quote = char
+      current = current or ""
+    elseif char == "\\" and index < length then
+      index = index + 1
+      current = (current or "") .. args:sub(index, index)
+    elseif char:match("%s") then
+      if current then
+        result[#result + 1] = current
+        current = nil
+      end
+    else
+      current = (current or "") .. char
+    end
+    index = index + 1
+  end
+  if quote then
+    return nil, "unterminated " .. quote .. " quote in arguments"
+  end
+  if current then
+    result[#result + 1] = current
+  end
+  return result
 end
 
 local function git_command()
@@ -224,8 +277,17 @@ open_deleted = function(item, root)
     vim.notify("CurrantGit: " .. error_message, vim.log.levels.ERROR)
     return
   end
-  local revision = item.status:sub(1, 1) == "D" and "HEAD" or ":"
-  local target = revision == ":" and (revision .. item.path) or (revision .. ":" .. item.path)
+  -- `git help gitrevisions`: `:[<n>:]<path>` optionally reads a leading
+  -- stage number (0-3) followed by a colon before the path. The shorthand
+  -- with no stage number (bare `:<path>`) is ambiguous for a real filename
+  -- that itself starts with a digit 0-3 followed by a colon (e.g.
+  -- `2:file.txt`): Git parses `:2:file.txt` as "stage 2, path file.txt",
+  -- not "stage 0, path 2:file.txt". The explicit `:0:<path>` form has no
+  -- such ambiguity -- Git only strips one stage-number prefix, not a
+  -- repeated one, so it still resolves correctly even when the path itself
+  -- starts with a digit-colon sequence.
+  local is_staged_delete = item.status:sub(1, 1) == "D"
+  local target = is_staged_delete and ("HEAD:" .. item.path) or (":0:" .. item.path)
   execute({ git_command(), "show", target }, {
     cwd = root,
     text = true,
@@ -545,6 +607,15 @@ open_diff_args = function(args, root)
       local path
       for index, arg in ipairs(args) do
         if arg == "--" then path = args[index + 1] end
+      end
+      -- `path` here is only a fallback for the (practically unreachable for
+      -- real `git diff` output) case where a hunk has no preceding `diff
+      -- --git` header at all -- see diff.lua. Strip CurrantGit's own
+      -- `:(literal)` pathspec-magic prefix so that fallback, if it is ever
+      -- actually used, still gets the real filename rather than the raw
+      -- constructed pathspec.
+      if path then
+        path = path:gsub("^:%(literal%)", "")
       end
       local lines, fold_levels, line_items, hunks = diff.parse(result.stdout or "", { mode = mode, path = path })
       navigation.update(0)
@@ -939,7 +1010,12 @@ function M.setup(opts)
   })
 
   vim.api.nvim_create_user_command("Git", function(command)
-    M.git(split_args(command.args))
+    local args, error_message = split_args(command.args)
+    if not args then
+      vim.notify("CurrantGit: " .. error_message, vim.log.levels.ERROR)
+      return
+    end
+    M.git(args)
   end, {
     bang = true,
     nargs = "*",

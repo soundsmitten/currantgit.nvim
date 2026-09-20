@@ -1,7 +1,15 @@
 # Git safety audit — 2026-09-19
 
-**Status:** Complete for the scope below. Remaining scope is tracked in
-[`2026-09-19-git-safety-audit-continuation.md`](2026-09-19-git-safety-audit-continuation.md).
+**Status:** Complete for the scope below, plus the continuation scope in
+[`2026-09-19-git-safety-audit-continuation.md`](2026-09-19-git-safety-audit-continuation.md),
+which is also now complete (branch `codex/git-safety-audit-continuation`,
+2026-09-20). Three more findings were fixed during the continuation pass
+(`:Git` argument splitting, `hunk.path` corruption for quoted/tab-suffixed
+diff headers, and `open_deleted`'s ambiguous index-object shorthand); bare
+repositories, detached HEAD, unborn branches, `git apply` edge cases,
+unusual-but-valid paths, and worktrees/submodules were all independently
+verified already safe. See `docs/decisions/0008`–`0013` and the updated
+"Remaining dragons"/"Guarantees" sections below.
 
 **Scope:** a comprehensive correctness/safety audit of CurrantGit's Git
 mutation and parsing surfaces — status/index/worktree semantics, diff and
@@ -257,30 +265,68 @@ the full `scripts/test` harness (`contract validation` → `log` → `safety` �
 
 ## Remaining dragons
 
-Explicitly **not** covered by this pass — see the continuation document for
-the concrete next steps:
+Updated 2026-09-20 after the continuation pass (see
+[`2026-09-19-git-safety-audit-continuation.md`](2026-09-19-git-safety-audit-continuation.md)
+and `docs/decisions/0008`–`0013` for how each item below was resolved).
 
-- `:Git`'s argument splitting (`vim.fn.split(args, [[\s\+]], true)`) is
-  naive whitespace splitting with no shell-quote awareness.
-- Bare repositories, detached HEAD, and unborn branches have not been
-  exercised end-to-end through CurrantGit (only through raw `git` during
-  format verification).
-- `git apply`'s context/fuzz/atomicity/failure-mode behavior for hunk
-  stage/unstage has not been adversarially tested (e.g. a hunk that
-  partially applies, or a patch against a file with no trailing newline).
-- Unusual-but-valid paths (unicode, embedded spaces, leading `-`) have not
-  been exercised end-to-end through the UI, only reasoned about for the
-  parsing/pathspec changes above.
-- `open_diff_args`'s path extraction only recognizes a single path
-  immediately after `--`, which mis-attributes path for multi-pathspec
-  diffs.
-- `open_deleted`'s `<rev>:<path>` object-specifier construction has a
-  theoretical colon-in-filename ambiguity, not yet exercised.
-- Worktrees and submodules have not been exercised at all.
+Resolved by the continuation pass, no longer dragons:
+
+- `:Git`'s argument splitting was naive whitespace splitting with no
+  shell-quote awareness — **fixed**, now quote-aware with a clean refusal
+  on an unterminated quote (decision 0008).
+- Bare repositories, detached HEAD, and unborn branches had not been
+  exercised end-to-end — **verified already safe**, no code change needed
+  (decision 0009).
+- `git apply`'s context/atomicity/no-trailing-newline/stale-hunk behavior
+  for hunk stage/unstage had not been adversarially tested — **verified
+  already safe**, no code change needed (decision 0010).
+- Unusual-but-valid paths (unicode, embedded spaces, leading `-`) had not
+  been exercised end-to-end — **a real bug was found and fixed**: quoted
+  and tab-suffixed diff headers corrupted `hunk.path` (decision 0011).
+- `open_diff_args`'s single-pathspec fallback extraction — **verified
+  practically unreachable** for real `git diff` output once the header-path
+  extraction fix above is in place; every hunk gets its own real path from
+  its own header regardless of which pathspec was passed (decision 0011).
+- `open_deleted`'s `<rev>:<path>` colon-in-filename ambiguity — **a real bug
+  was found and fixed**: the bare `:<path>` shorthand is genuinely ambiguous
+  for a filename starting with a digit 0-3 and a colon (decision 0012).
+- Worktrees and submodules — **verified already safe**, no code change
+  needed; a "dirty submodule can't be staged from the parent" behavior was
+  confirmed to be normal Git semantics, not a bug (decision 0013).
+
+Still open, out of scope for both passes so far:
+
+- `git apply`'s behavior for a hunk that *partially* applies with
+  `--reject` has not been tested (CurrantGit never passes `--reject`, so
+  this is currently moot, but would need its own verification if that ever
+  changed).
+- No fuzz/property-based testing of the status/diff parsers against
+  arbitrarily malformed or adversarially crafted Git output (only real,
+  valid Git output shapes have been exercised).
+- RPC/provider-facing surfaces (`lua/currantgit/rpc.lua`) have not been
+  through a dedicated adversarial pass of their own.
 
 ## Guarantees CurrantGit can and cannot make
 
-**Can, as of this audit:** a CurrantGit surface stays pinned to the
+**Can, as of the continuation pass (2026-09-20):** everything from the
+original pass below, plus: `:Git` commands with quoted multi-word arguments
+(single- or double-quoted, including escaped double quotes) are tokenized
+correctly, and an unterminated quote is refused cleanly with no Git process
+spawned; a bare repository refuses cleanly at the first step with no crash
+or phantom surface; detached HEAD and an unborn branch both render and
+behave correctly for status/diff, with log/blame failing as clean, expected
+Git errors on an unborn branch; hunk stage/unstage correctly handles a
+missing trailing newline, sequential multi-hunk staging, and fails
+atomically (index untouched) when a patch's context no longer matches;
+stage/unstage/diff/blame/discard/open all work correctly for unicode,
+embedded-space, and leading-dash filenames, and a hunk's `path` field is the
+real filename even when Git quotes or tab-suffixes it in the diff header;
+`open_deleted` resolves correctly even for a filename that itself looks like
+an index stage-number prefix; CurrantGit works correctly from inside a
+linked worktree (and cannot leak a mutation into the main repository's own
+worktree) and from inside a submodule's own working copy.
+
+**Original pass (2026-09-19):** a CurrantGit surface stays pinned to the
 repository it was opened from regardless of later `:cd`s; stage, unstage,
 and discard on a literal filename cannot collaterally mutate a
 similarly-named file; hunk staging cannot silently apply an unrelated
@@ -290,11 +336,9 @@ does not crash the plugin; renamed files are addressable and actionable by
 their real current path; non-conflict staged-add/worktree-delete files are
 not shown as merge conflicts.
 
-**Cannot yet claim:** safety for bare repositories, detached HEAD, unborn
-branches, worktrees, or submodules (untested); correctness of `git apply`
-under partial/fuzzy application or missing-trailing-newline patches
-(untested); correct behavior for `:Git` commands with quoted multi-word
-arguments (known-likely-broken, unfixed); full correctness for
-unicode/space/leading-dash filenames through the entire action surface
-(reasoned about, not exercised end-to-end). These are the dragons above, not
-silent gaps — see the continuation document.
+**Cannot yet claim:** correctness under `git apply --reject` partial
+application (not used by CurrantGit today, so not currently a live risk);
+robustness against malformed/adversarially-crafted Git output beyond real,
+valid Git output shapes; anything about the RPC/provider surface's own
+Git-safety properties, which has not had a dedicated adversarial pass. These
+are the dragons above, not silent gaps.

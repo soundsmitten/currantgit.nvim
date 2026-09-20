@@ -21,6 +21,23 @@ local function git(args, cwd)
   return vim.trim(result.stdout or "")
 end
 
+-- `--name-only` without `-z` C-quotes/octal-escapes unusual paths (same
+-- `core.quotePath` behavior as diff headers -- see diff.lua's
+-- `unquote_diff_path`), so a plain string comparison against a raw unicode
+-- filename would spuriously fail even when the correct file is staged.
+-- `-z` gives raw, unquoted, NUL-terminated paths instead.
+local function changed_paths(args, cwd)
+  local result = vim.system(vim.list_extend({ "git" }, vim.list_extend(vim.deepcopy(args), { "-z" })), {
+    cwd = cwd, text = true,
+  }):wait()
+  assert(result.code == 0, result.stderr)
+  local paths = {}
+  for _, entry in ipairs(vim.split(result.stdout or "", "\0", { plain = true })) do
+    if entry ~= "" then paths[#paths + 1] = entry end
+  end
+  return paths
+end
+
 local function read_file(path)
   local file = assert(io.open(path, "r"))
   local content = file:read("*a")
@@ -370,11 +387,765 @@ local function test_diff_mode_trust()
   vim.fn.delete(repo, "rf")
 end
 
+-- 7. `:Git` argument splitting (HIGH): `command.args` (Neovim's `<args>`,
+-- confirmed via `:help nvim_create_user_command()` to be the raw,
+-- unprocessed argument string -- NOT quote-aware `<q-args>`-then-split) must
+-- be tokenized the way a user typing `:Git commit -m "two words"` expects: a
+-- quoted multi-word argument survives as one argv element. Naive
+-- whitespace-only splitting instead produces `{"commit", "-m", '"two',
+-- 'words"'}`, which either fails outright or silently commits the wrong
+-- message.
+local function test_git_command_quoted_args()
+  local repo = make_repo()
+  write_file(repo .. "/f.txt", "one\n")
+  git({ "add", "f.txt" }, repo)
+  git({ "commit", "-q", "-m", "base" }, repo)
+  write_file(repo .. "/f.txt", "one\ntwo\n")
+  git({ "add", "f.txt" }, repo)
+
+  vim.cmd("cd " .. vim.fn.fnameescape(repo))
+  vim.cmd([[Git commit -m "two words"]])
+  -- A generous timeout: each predicate here shells out for real (`git log`),
+  -- and under host CPU contention a real `git commit` + `git log` round trip
+  -- can occasionally take longer than a tight timeout allows, producing a
+  -- false failure unrelated to argument-splitting correctness.
+  assert(vim.wait(8000, function()
+    return git({ "log", "-1", "--format=%s" }, repo) == "two words"
+  end, 20), "quoted multi-word :Git commit argument was not preserved as one argv element")
+  assert(git({ "status", "--porcelain" }, repo) == "", "commit should have left the worktree clean")
+
+  write_file(repo .. "/f.txt", "one\ntwo\nthree\n")
+  git({ "add", "f.txt" }, repo)
+  vim.cmd([[Git commit -m 'single-quoted words too']])
+  assert(vim.wait(8000, function()
+    return git({ "log", "-1", "--format=%s" }, repo) == "single-quoted words too"
+  end, 20), "single-quoted multi-word :Git commit argument was not preserved as one argv element")
+
+  write_file(repo .. "/f.txt", "one\ntwo\nthree\nfour\n")
+  git({ "add", "f.txt" }, repo)
+  vim.cmd([[Git commit -m "quote: \"nested\""]])
+  assert(vim.wait(8000, function()
+    return git({ "log", "-1", "--format=%s" }, repo) == 'quote: "nested"'
+  end, 20), "escaped double-quote inside a quoted argument was not preserved")
+
+  -- An unterminated quote is malformed input: refuse cleanly and touch
+  -- nothing, rather than guessing where the argument was meant to end.
+  -- Dispatched through real cmdline key input (`nvim_feedkeys`), not
+  -- `vim.cmd()`/`nvim_exec2()` -- a synchronous `vim.notify(ERROR)` inside a
+  -- user-command callback re-raises as a Vim error when invoked through
+  -- `nvim_exec2`, which is an artifact of that entry point, not of how a
+  -- real `:Git ...<CR>` keypress behaves.
+  local before_status = git({ "status", "--porcelain" }, repo)
+  vim.api.nvim_feedkeys(
+    vim.api.nvim_replace_termcodes([[:Git commit -m "unterminated<CR>]], true, false, true),
+    "x",
+    false
+  )
+  vim.wait(200, function() return false end, 10)
+  assert(git({ "status", "--porcelain" }, repo) == before_status,
+    "an unterminated quote must not run any Git command or change repository state")
+
+  vim.cmd("cd " .. vim.fn.fnameescape(original_cwd))
+  vim.fn.delete(repo, "rf")
+end
+
+-- 8. Bare repository (audit continuation item 2): a bare repo has no
+-- working tree, so `git rev-parse --show-toplevel` (which `repository_root`
+-- relies on) fails with a clear, real Git error rather than returning a
+-- path. Every top-level entry point must surface that failure as a boring
+-- notification and never crash or render a misleading/empty surface.
+local function test_bare_repository_refuses_cleanly()
+  local dir = vim.fn.tempname()
+  git({ "init", "-q", "--bare", dir })
+
+  vim.cmd("cd " .. vim.fn.fnameescape(dir))
+  local before_buffer = vim.api.nvim_get_current_buf()
+  currantgit.git({})
+  vim.wait(300, function() return false end, 10)
+  -- `repository_root()` fails before `open_status` ever calls `set_buffer`
+  -- (which always switches the current buffer), so the current buffer must
+  -- be unchanged. Checking the *previously current* buffer's filetype would
+  -- be wrong: it could already be a reused `currantgit://status` buffer left
+  -- over from an earlier test in this same Neovim instance (see
+  -- docs/gotchas.md on stale-render buffer reuse).
+  assert(vim.api.nvim_get_current_buf() == before_buffer,
+    "a bare repository has no working tree; :Git status must not render a status surface")
+
+  currantgit.git({ "log" })
+  vim.wait(300, function() return false end, 10)
+  currantgit.git({ "diff" })
+  vim.wait(300, function() return false end, 10)
+  assert(#currantgit.errors() == 0,
+    "bare-repository commands must fail as clean notifications, not crashes: "
+      .. table.concat(currantgit.errors(), "\n"))
+
+  vim.cmd("cd " .. vim.fn.fnameescape(original_cwd))
+  vim.fn.delete(dir, "rf")
+end
+
+-- 9. Detached HEAD (audit continuation item 2): `## HEAD (no branch)` is a
+-- real, valid `git status --porcelain=v1 -z --branch` header line, and every
+-- ordinary action (status render, diff) must keep working normally against
+-- a detached-HEAD checkout.
+local function test_detached_head()
+  local repo = make_repo()
+  write_file(repo .. "/f.txt", "one\n")
+  git({ "add", "f.txt" }, repo)
+  git({ "commit", "-q", "-m", "c1" }, repo)
+  write_file(repo .. "/f.txt", "one\ntwo\n")
+  git({ "add", "f.txt" }, repo)
+  git({ "commit", "-q", "-m", "c2" }, repo)
+  git({ "checkout", "-q", "--detach", "HEAD~1" }, repo)
+  write_file(repo .. "/f.txt", "one\ndetached-edit\n")
+
+  vim.cmd("cd " .. vim.fn.fnameescape(repo))
+  open_status_and_wait()
+  assert_contains(vim.api.nvim_buf_get_lines(0, 0, -1, false), "HEAD (no branch)")
+  goto_item("f.txt")
+
+  local before_buffer = vim.api.nvim_get_current_buf()
+  local before_tick = vim.api.nvim_buf_get_changedtick(before_buffer)
+  local diff_mapping = vim.fn.maparg("d", "n", false, true)
+  assert(diff_mapping.callback, "diff mapping was not registered")
+  diff_mapping.callback()
+  assert(vim.wait(3000, function()
+    return vim.bo.filetype == "diff"
+      and (vim.api.nvim_get_current_buf() ~= before_buffer
+        or vim.api.nvim_buf_get_changedtick(before_buffer) > before_tick)
+  end, 10), "diff did not open against a detached-HEAD checkout")
+  assert_contains(vim.api.nvim_buf_get_lines(0, 0, -1, false), "+detached-edit")
+  assert(#currantgit.errors() == 0, table.concat(currantgit.errors(), "\n"))
+
+  vim.cmd("cd " .. vim.fn.fnameescape(original_cwd))
+  vim.fn.delete(repo, "rf")
+end
+
+-- 10. Unborn branch / zero-commit repository (audit continuation item 2):
+-- `## No commits yet on <branch>` is a real, valid status header, `git log`
+-- and `git blame` both fail with a real, expected Git error (no HEAD to
+-- resolve yet) rather than hanging or crashing, and `git diff` against an
+-- empty index/worktree is simply empty.
+local function test_unborn_branch()
+  local dir = vim.fn.tempname()
+  vim.fn.mkdir(dir, "p")
+  git({ "init", "-q", "-b", "main" }, dir)
+  git({ "config", "user.name", "CurrantGit Safety" }, dir)
+  git({ "config", "user.email", "safety@currantgit.invalid" }, dir)
+  write_file(dir .. "/f.txt", "content\n")
+
+  vim.cmd("cd " .. vim.fn.fnameescape(dir))
+  open_status_and_wait()
+  assert_contains(vim.api.nvim_buf_get_lines(0, 0, -1, false), "No commits yet on main")
+  assert_contains(vim.api.nvim_buf_get_lines(0, 0, -1, false), "f.txt")
+
+  currantgit.git({ "log" })
+  vim.wait(300, function() return false end, 10)
+  currantgit.git({ "diff" })
+  vim.wait(300, function() return false end, 10)
+  vim.cmd("edit " .. vim.fn.fnameescape(dir .. "/f.txt"))
+  currantgit.git({ "blame", "f.txt" })
+  vim.wait(300, function() return false end, 10)
+  assert(#currantgit.errors() == 0,
+    "unborn-branch log/diff/blame must fail as clean notifications, not crashes: "
+      .. table.concat(currantgit.errors(), "\n"))
+
+  vim.cmd("cd " .. vim.fn.fnameescape(original_cwd))
+  vim.fn.delete(dir, "rf")
+end
+
+local function open_diff_and_wait(args)
+  local before_buffer = vim.api.nvim_get_current_buf()
+  local before_tick = vim.api.nvim_buf_get_changedtick(before_buffer)
+  currantgit.git(args)
+  assert(vim.wait(3000, function()
+    return vim.bo.filetype == "diff"
+      and (vim.api.nvim_get_current_buf() ~= before_buffer
+        or vim.api.nvim_buf_get_changedtick(before_buffer) > before_tick)
+  end, 10), "diff did not open for " .. table.concat(args, " "))
+end
+
+-- Stages the hunk under the cursor and waits for BOTH the real Git state
+-- (`git_predicate`, independently re-derived) and CurrantGit's own
+-- post-stage refresh (`open_diff_args` re-running `git diff`) to actually
+-- finish, not just the former. Waiting on real Git state alone is not
+-- enough here: `stage_hunk`'s callback kicks off its own async `git diff`
+-- refresh, and if a test moves on (and deletes its repo) before that
+-- refresh's subprocess has actually spawned, it fails later with an ENOENT
+-- against a directory that no longer exists -- corrupting an unrelated
+-- later test. See docs/gotchas.md on waiting for genuine completion, not a
+-- flag/state a stale render could already satisfy.
+local function stage_current_hunk_and_wait(git_predicate)
+  local before_buffer = vim.api.nvim_get_current_buf()
+  local before_tick = vim.api.nvim_buf_get_changedtick(before_buffer)
+  local stage_mapping = vim.fn.maparg("s", "n", false, true)
+  assert(stage_mapping.callback, "stage-hunk mapping was not registered")
+  stage_mapping.callback()
+  assert(vim.wait(3000, function()
+    return git_predicate()
+      and vim.bo.filetype == "diff"
+      and (vim.api.nvim_get_current_buf() ~= before_buffer
+        or vim.api.nvim_buf_get_changedtick(before_buffer) > before_tick)
+  end, 10), "hunk stage did not settle")
+end
+
+local function goto_hunk(index)
+  index = index or 1
+  local found = 0
+  local lines = {}
+  for line, item in pairs(vim.b.currantgit_line_items or {}) do
+    if type(item) == "table" and item.kind == "hunk" then lines[#lines + 1] = line end
+  end
+  table.sort(lines)
+  local line = lines[index]
+  assert(line, "expected at least " .. index .. " hunk(s) in the diff")
+  vim.api.nvim_win_set_cursor(0, { line, 0 })
+end
+
+-- 11. `git apply --cached` on a hunk touching a file with no trailing
+-- newline (audit continuation item 3): Git represents this with a literal
+-- `\ No newline at end of file` marker line in the diff. Staging must
+-- reproduce the exact byte content, not silently gain or lose a trailing
+-- newline.
+local function test_hunk_stage_no_trailing_newline()
+  local repo = make_repo()
+  write_file(repo .. "/f.txt", "line1\nline2")
+  git({ "add", "f.txt" }, repo)
+  git({ "commit", "-q", "-m", "base" }, repo)
+  write_file(repo .. "/f.txt", "line1\nline2-changed")
+
+  vim.cmd("cd " .. vim.fn.fnameescape(repo))
+  open_diff_and_wait({ "diff", "--", "f.txt" })
+  goto_hunk(1)
+  stage_current_hunk_and_wait(function()
+    return git({ "diff", "--cached", "--name-only" }, repo) == "f.txt"
+  end)
+
+  local staged = git({ "cat-file", "blob", ":f.txt" }, repo)
+  assert(staged == "line1\nline2-changed",
+    "staged blob must byte-match the working tree content exactly, got: " .. vim.inspect(staged))
+  assert(git({ "diff", "--name-only" }, repo) == "", "the file should now be fully staged")
+  assert(#currantgit.errors() == 0, table.concat(currantgit.errors(), "\n"))
+
+  vim.cmd("cd " .. vim.fn.fnameescape(original_cwd))
+  vim.fn.delete(repo, "rf")
+end
+
+-- 12. Sequential multi-hunk staging (audit continuation item 3):
+-- stage_hunk/unstage_hunk always re-run `git diff` after mutating the index
+-- (see `open_diff_args` callback in `action_context`), so a second hunk's
+-- patch is regenerated against the now-current index rather than reused
+-- stale. Staging both hunks in a two-hunk file, one at a time, must fully
+-- stage the file with nothing left unstaged.
+local function test_hunk_stage_sequential_multi_hunk()
+  local repo = make_repo()
+  local lines = {}
+  for line_number = 1, 20 do lines[line_number] = tostring(line_number) end
+  write_file(repo .. "/f.txt", table.concat(lines, "\n") .. "\n")
+  git({ "add", "f.txt" }, repo)
+  git({ "commit", "-q", "-m", "base" }, repo)
+  lines[2] = "TWO-changed"
+  lines[18] = "EIGHTEEN-changed"
+  write_file(repo .. "/f.txt", table.concat(lines, "\n") .. "\n")
+
+  vim.cmd("cd " .. vim.fn.fnameescape(repo))
+  open_diff_and_wait({ "diff", "--", "f.txt" })
+  goto_hunk(1)
+  -- `currantgit_line_items` maps every LINE inside a hunk's body to that
+  -- same hunk object (see diff.lua), so counting entries there counts lines,
+  -- not hunks. `currantgit_diff_hunks` is the actual per-hunk list.
+  stage_current_hunk_and_wait(function()
+    return #(vim.b.currantgit_diff_hunks or {}) == 1
+  end)
+
+  goto_hunk(1)
+  stage_current_hunk_and_wait(function()
+    return git({ "diff", "--name-only" }, repo) == ""
+  end)
+
+  assert(git({ "diff", "--cached", "--name-only" }, repo) == "f.txt", "both hunks should now be staged")
+  local staged = git({ "cat-file", "blob", ":f.txt" }, repo)
+  assert(staged:find("TWO%-changed") and staged:find("EIGHTEEN%-changed"),
+    "both hunks' content must be present in the staged blob")
+  assert(#currantgit.errors() == 0, table.concat(currantgit.errors(), "\n"))
+
+  vim.cmd("cd " .. vim.fn.fnameescape(original_cwd))
+  vim.fn.delete(repo, "rf")
+end
+
+-- 13. Failed hunk application is atomic (audit continuation item 3): if a
+-- hunk's patch no longer applies (its context has already diverged from the
+-- index), `git apply --cached` must fail the whole patch and leave the index
+-- completely unchanged (`git help apply`: "For atomicity, git apply by
+-- default fails the whole patch and does not touch the working tree when
+-- some of the hunks do not apply") -- never a partial/corrupt index state,
+-- and CurrantGit must surface it as a clean error, not silently do nothing
+-- while claiming success.
+local function test_hunk_stage_atomic_on_conflict()
+  local repo = make_repo()
+  write_file(repo .. "/f.txt", "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n")
+  git({ "add", "f.txt" }, repo)
+  git({ "commit", "-q", "-m", "base" }, repo)
+  write_file(repo .. "/f.txt", "1\n2\n3\n4\nFIVE-changed\n6\n7\n8\n9\n10\n")
+
+  vim.cmd("cd " .. vim.fn.fnameescape(repo))
+  open_diff_and_wait({ "diff", "--", "f.txt" })
+  goto_hunk(1)
+  local hunk_item = vim.b.currantgit_line_items[vim.api.nvim_win_get_cursor(0)[1]]
+  assert(type(hunk_item) == "table" and hunk_item.kind == "hunk", "expected a hunk under the cursor")
+  local stale_patch = hunk_item.patch
+
+  -- Stage it for real once (this is the legitimate path), which makes the
+  -- index already equal the patch's "new" side.
+  stage_current_hunk_and_wait(function()
+    return git({ "diff", "--cached", "--name-only" }, repo) == "f.txt"
+      and git({ "diff", "--name-only" }, repo) == ""
+  end)
+
+  local index_before = git({ "cat-file", "blob", ":f.txt" }, repo)
+  -- Re-applying the SAME (now stale) patch text directly against the
+  -- current index must fail, and fail without mutating anything -- this
+  -- reproduces the "diff buffer went stale, user still presses the stage
+  -- key" race directly against real Git, independent of CurrantGit's own
+  -- reporting of the outcome.
+  local result = vim.system({ "git", "apply", "--cached", "--unidiff-zero" }, {
+    cwd = repo,
+    text = true,
+    stdin = stale_patch,
+  }):wait()
+  assert(result.code ~= 0, "a stale hunk patch must not apply cleanly a second time")
+  local index_after = git({ "cat-file", "blob", ":f.txt" }, repo)
+  assert(index_before == index_after,
+    "a failed git apply --cached must leave the index completely unchanged")
+
+  vim.cmd("cd " .. vim.fn.fnameescape(original_cwd))
+  vim.fn.delete(repo, "rf")
+end
+
+-- 14. A hunk's patch is pinned to the moment the diff was rendered, not to
+-- the live worktree (audit continuation item 3, "stale hunk"): `git apply
+-- --cached` only ever compares against the INDEX, never the worktree. If the
+-- worktree changes again after a diff is opened but before the index has
+-- been touched, staging the (now visually stale) hunk still succeeds --
+-- because its "old" side still matches the untouched index -- and stages
+-- exactly the patch that was visible when the diff was opened, not
+-- whatever is in the worktree now. This is correct, expected `git apply
+-- --cached` behavior (it is defined purely in terms of the index), not data
+-- loss: the worktree's further edit is left completely untouched. Recorded
+-- as a real, non-obvious behavior a user could be surprised by, not treated
+-- as a bug to "fix" by inventing staleness detection Git itself has no
+-- concept of.
+local function test_hunk_stage_pinned_to_render_time_not_worktree()
+  local repo = make_repo()
+  write_file(repo .. "/f.txt", "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n")
+  git({ "add", "f.txt" }, repo)
+  git({ "commit", "-q", "-m", "base" }, repo)
+  write_file(repo .. "/f.txt", "1\n2\n3\n4\nFIVE-changed\n6\n7\n8\n9\n10\n")
+
+  vim.cmd("cd " .. vim.fn.fnameescape(repo))
+  open_diff_and_wait({ "diff", "--", "f.txt" })
+  goto_hunk(1)
+
+  -- The worktree changes again after the diff was rendered, before the
+  -- index has been touched at all.
+  write_file(repo .. "/f.txt", "1\n2\n3\n4\nFIVE-changed-EXTERNALLY\n6\n7\n8\n9\n10\n")
+
+  stage_current_hunk_and_wait(function()
+    return git({ "diff", "--cached", "--name-only" }, repo) == "f.txt"
+  end)
+
+  local staged = git({ "cat-file", "blob", ":f.txt" }, repo)
+  assert(staged:find("FIVE%-changed\n") and not staged:find("EXTERNALLY"),
+    "the staged content should be exactly what the diff showed, not the later worktree edit")
+  assert(read_file(repo .. "/f.txt"):find("EXTERNALLY"),
+    "the later worktree edit must survive untouched in the working tree")
+  assert(#currantgit.errors() == 0, table.concat(currantgit.errors(), "\n"))
+
+  vim.cmd("cd " .. vim.fn.fnameescape(original_cwd))
+  vim.fn.delete(repo, "rf")
+end
+
+-- 15. Unusual-but-valid paths through the real UI (audit continuation item
+-- 4, combined with item 5): a filename containing non-ASCII bytes makes Git
+-- C-quote/octal-escape it in unified-diff headers (`core.quotePath`, always
+-- on for such bytes) -- `diff --git "a/caf\303\251.txt" "b/caf\303\251.txt"`,
+-- not `diff --git a/café.txt b/café.txt`. `diff.lua`'s
+-- `+++ b/(.+)` header-path regex didn't match that quoted form, so it fell
+-- through to `open_diff_args`'s naive fallback path -- which, reached via
+-- the real `d` (diff) mapping, is the RAW constructed pathspec including
+-- CurrantGit's own `:(literal)` prefix, not the real filename. `hunk.path`
+-- ended up literally `":(literal)café.txt"`. Also exercises stage, unstage,
+-- discard, open, and blame against unicode, embedded-space, and
+-- leading-dash filenames end-to-end.
+local function test_unusual_paths_end_to_end()
+  local repo = make_repo()
+  local paths = { "café.txt", "file with spaces.txt", "-dashfile.txt" }
+  for _, path in ipairs(paths) do
+    write_file(repo .. "/" .. path, "one\n")
+  end
+  git({ "add", "." }, repo)
+  git({ "commit", "-q", "-m", "base" }, repo)
+  for _, path in ipairs(paths) do
+    write_file(repo .. "/" .. path, "one\ntwo\n")
+  end
+
+  vim.cmd("cd " .. vim.fn.fnameescape(repo))
+
+  -- Waits below use a longer timeout and coarser poll interval than the
+  -- rest of this file: this test drives five real async actions per path
+  -- across three paths, several of which (`changed_paths`) shell out to
+  -- real `git` inside the poll predicate itself. A tight interval can
+  -- re-spawn `git` hundreds of times over a few seconds, which under host
+  -- CPU contention can starve the very thing it's waiting on and produce a
+  -- false "did not settle" (observed in practice on a loaded machine). Real
+  -- settling normally takes well under a second; 8s stays comfortably above
+  -- that noise floor without masking a genuine hang.
+  for _, path in ipairs(paths) do
+    open_status_and_wait()
+    goto_item(path)
+
+    local before_buffer = vim.api.nvim_get_current_buf()
+    local before_tick = vim.api.nvim_buf_get_changedtick(before_buffer)
+    local diff_mapping = vim.fn.maparg("d", "n", false, true)
+    diff_mapping.callback()
+    assert(vim.wait(8000, function()
+      return vim.bo.filetype == "diff"
+        and (vim.api.nvim_get_current_buf() ~= before_buffer
+          or vim.api.nvim_buf_get_changedtick(before_buffer) > before_tick)
+    end, 20), "diff did not open for " .. path)
+    assert_contains(vim.api.nvim_buf_get_lines(0, 0, -1, false), "+two")
+    for _, item in pairs(vim.b.currantgit_line_items or {}) do
+      if type(item) == "table" and item.kind == "hunk" then
+        assert(item.path == path,
+          "hunk.path for " .. path .. " must be the real filename, got: " .. vim.inspect(item.path))
+      end
+    end
+
+    open_status_and_wait()
+    goto_item(path)
+    -- Wait for CurrantGit's own post-action refresh (filetype + changedtick),
+    -- not just real Git state: stage/unstage's callback fires its own
+    -- internal `open_status` (another real `git status` subprocess) after
+    -- the mutation. `git status` can briefly touch `index.lock` too (index
+    -- stat-cache refresh), so proceeding to the next mutating action (on the
+    -- same repo, from the next loop iteration or the very next step) while
+    -- that trailing refresh is still in flight reproduces exactly the
+    -- `.git/index.lock` collision documented as Finding 7 in
+    -- docs/audits/2026-09-19-git-safety-audit.md and docs/gotchas.md.
+    local stage_before_buffer = vim.api.nvim_get_current_buf()
+    local stage_before_tick = vim.api.nvim_buf_get_changedtick(stage_before_buffer)
+    local stage_mapping = vim.fn.maparg("s", "n", false, true)
+    stage_mapping.callback()
+    assert(vim.wait(8000, function()
+      local staged = changed_paths({ "diff", "--cached", "--name-only" }, repo)
+      return vim.tbl_contains(staged, path)
+        and vim.bo.filetype == "currantgit"
+        and (vim.api.nvim_get_current_buf() ~= stage_before_buffer
+          or vim.api.nvim_buf_get_changedtick(stage_before_buffer) > stage_before_tick)
+    end, 50), "stage did not settle for " .. path)
+
+    open_status_and_wait()
+    goto_item(path)
+    local unstage_before_buffer = vim.api.nvim_get_current_buf()
+    local unstage_before_tick = vim.api.nvim_buf_get_changedtick(unstage_before_buffer)
+    local unstage_mapping = vim.fn.maparg("u", "n", false, true)
+    unstage_mapping.callback()
+    assert(vim.wait(8000, function()
+      return not vim.tbl_contains(changed_paths({ "diff", "--cached", "--name-only" }, repo), path)
+        and vim.bo.filetype == "currantgit"
+        and (vim.api.nvim_get_current_buf() ~= unstage_before_buffer
+          or vim.api.nvim_buf_get_changedtick(unstage_before_buffer) > unstage_before_tick)
+    end, 50), "unstage did not settle for " .. path)
+    local unstaged = changed_paths({ "diff", "--name-only" }, repo)
+    assert(vim.tbl_contains(unstaged, path), "the file should be back to unstaged-modified")
+
+    open_status_and_wait()
+    goto_item(path)
+    local before_blame_buffer = vim.api.nvim_get_current_buf()
+    local blame_mapping = vim.fn.maparg("b", "n", false, true)
+    blame_mapping.callback()
+    assert(vim.wait(8000, function()
+      return vim.api.nvim_get_current_buf() ~= before_blame_buffer and vim.bo.filetype == "git"
+    end, 20), "blame did not open for " .. path)
+    assert_contains(vim.api.nvim_buf_get_lines(0, 0, -1, false), "one")
+
+    open_status_and_wait()
+    goto_item(path)
+    local original_select = vim.ui.select
+    vim.ui.select = function(_, _, callback) callback("Discard", 1) end
+    local discard_mapping = vim.fn.maparg("X", "n", false, true)
+    discard_mapping.callback()
+    assert(vim.wait(8000, function()
+      for _, item in ipairs(vim.b.currantgit_items or {}) do
+        if item.path == path then return false end
+      end
+      return true
+    end, 20), "discard did not settle for " .. path)
+    vim.ui.select = original_select
+    assert(read_file(repo .. "/" .. path) == "one\n", "discard did not revert " .. path)
+  end
+
+  for _, path in ipairs(paths) do
+    assert(read_file(repo .. "/" .. path) == "one\n", path .. " must be back to its committed content")
+  end
+  assert(#currantgit.errors() == 0, table.concat(currantgit.errors(), "\n"))
+
+  vim.cmd("cd " .. vim.fn.fnameescape(original_cwd))
+  vim.fn.delete(repo, "rf")
+end
+
+-- 16. `open_diff_args`'s single-pathspec fallback extraction (audit
+-- continuation item 5): `:Git diff -- a.txt b.txt` (two pathspecs) only
+-- ever records `a.txt` as the naive `options.path` fallback. Verify this is
+-- NOT a live bug: each file's own `diff --git`/`+++` header supplies its
+-- own real path (per decision 0011's header-path extraction), independent
+-- of which pathspec was passed on the command line, so every hunk still
+-- gets the correct path regardless of the fallback's ambiguity.
+local function test_diff_multi_pathspec_hunk_paths()
+  local repo = make_repo()
+  write_file(repo .. "/a.txt", "one\n")
+  write_file(repo .. "/b.txt", "one\n")
+  git({ "add", "." }, repo)
+  git({ "commit", "-q", "-m", "base" }, repo)
+  write_file(repo .. "/a.txt", "one\ntwo\n")
+  write_file(repo .. "/b.txt", "one\nthree\n")
+
+  vim.cmd("cd " .. vim.fn.fnameescape(repo))
+  open_diff_and_wait({ "diff", "--", "a.txt", "b.txt" })
+  local seen = {}
+  for _, item in pairs(vim.b.currantgit_line_items or {}) do
+    if type(item) == "table" and item.kind == "hunk" then seen[item.path] = true end
+  end
+  assert(seen["a.txt"], "expected a hunk with path a.txt")
+  assert(seen["b.txt"], "expected a hunk with path b.txt, not the first pathspec reused")
+  assert(#currantgit.errors() == 0, table.concat(currantgit.errors(), "\n"))
+
+  vim.cmd("cd " .. vim.fn.fnameescape(original_cwd))
+  vim.fn.delete(repo, "rf")
+end
+
+-- 17. `open_deleted`'s `<rev>:<path>` colon ambiguity (audit continuation
+-- item 6): for a worktree-deleted-but-still-indexed file, `open_deleted`
+-- built the object specifier as the ambiguous shorthand `:<path>` (no
+-- explicit stage number). Per `git help gitrevisions`, `:[<n>:]<path>`
+-- optionally reads a leading stage number (0-3) followed by a colon before
+-- the path -- so for a real file whose name itself starts with a digit
+-- 0-3 followed by a colon (e.g. `2:file.txt`), `:2:file.txt` is misparsed
+-- by Git itself as "stage 2, path file.txt" instead of "stage 0, path
+-- 2:file.txt", and fails with a wrong, misleading error. The explicit
+-- `:0:<path>` form has no such ambiguity (verified: Git only strips one
+-- stage-number prefix, not a repeated one, so it works even when the path
+-- itself starts with a digit-colon sequence).
+local function test_open_deleted_colon_in_filename()
+  local repo = make_repo()
+  write_file(repo .. "/2:file.txt", "real content\n")
+  git({ "add", "." }, repo)
+  git({ "commit", "-q", "-m", "base" }, repo)
+  os.remove(repo .. "/2:file.txt")
+
+  vim.cmd("cd " .. vim.fn.fnameescape(repo))
+  open_status_and_wait()
+  goto_item("2:file.txt")
+  local item = vim.b.currantgit_line_items[vim.api.nvim_win_get_cursor(0)[1]]
+  assert(type(item) == "table" and item.change_kind == "deleted",
+    "expected a worktree-deleted item for 2:file.txt")
+
+  local before_buffer = vim.api.nvim_get_current_buf()
+  local before_tick = vim.api.nvim_buf_get_changedtick(before_buffer)
+  local open_mapping = vim.fn.maparg("<CR>", "n", false, true)
+  assert(open_mapping.callback, "open mapping was not registered")
+  open_mapping.callback()
+  assert(vim.wait(8000, function()
+    return vim.b.currantgit_title == "deleted"
+      and (vim.api.nvim_get_current_buf() ~= before_buffer
+        or vim.api.nvim_buf_get_changedtick(before_buffer) > before_tick)
+  end, 20), "opening a worktree-deleted file with a digit-colon name did not settle")
+  assert_contains(vim.api.nvim_buf_get_lines(0, 0, -1, false), "real content")
+  assert(#currantgit.errors() == 0, table.concat(currantgit.errors(), "\n"))
+
+  vim.cmd("cd " .. vim.fn.fnameescape(original_cwd))
+  vim.fn.delete(repo, "rf")
+end
+
+-- 18. Linked worktrees (audit continuation item 7): a linked worktree's
+-- `.git` is a FILE (`gitdir: <path>/.git/worktrees/<name>`), not a
+-- directory, and its git-dir lives under the main repo's `.git`. Verify
+-- `repository_root()` (`git rev-parse --show-toplevel`) still resolves to
+-- the worktree's OWN directory, not the main repo's, and that status/diff/
+-- stage all work correctly from inside it.
+local function test_linked_worktree()
+  local main_repo = make_repo()
+  write_file(main_repo .. "/f.txt", "one\n")
+  git({ "add", "f.txt" }, main_repo)
+  git({ "commit", "-q", "-m", "base" }, main_repo)
+
+  local worktree_dir = vim.fn.tempname()
+  git({ "worktree", "add", "-q", "-b", "feature", worktree_dir }, main_repo)
+  write_file(worktree_dir .. "/f.txt", "one\ntwo\n")
+
+  vim.cmd("cd " .. vim.fn.fnameescape(worktree_dir))
+  open_status_and_wait()
+  assert_contains(vim.api.nvim_buf_get_lines(0, 0, -1, false), "f.txt")
+  goto_item("f.txt")
+
+  local before_buffer = vim.api.nvim_get_current_buf()
+  local before_tick = vim.api.nvim_buf_get_changedtick(before_buffer)
+  local stage_mapping = vim.fn.maparg("s", "n", false, true)
+  assert(stage_mapping.callback, "stage mapping was not registered")
+  stage_mapping.callback()
+  -- Wait for CurrantGit's OWN post-stage refresh to finish (not just real
+  -- Git state) before this test deletes `main_repo` below -- that repo's
+  -- `.git/worktrees/...` metadata is what every git command run from
+  -- `worktree_dir` depends on, so a still-in-flight refresh racing the
+  -- delete reproduces the exact ENOENT class of bug documented in
+  -- docs/gotchas.md.
+  assert(vim.wait(8000, function()
+    return vim.tbl_contains(changed_paths({ "diff", "--cached", "--name-only" }, worktree_dir), "f.txt")
+      and vim.bo.filetype == "currantgit"
+      and (vim.api.nvim_get_current_buf() ~= before_buffer
+        or vim.api.nvim_buf_get_changedtick(before_buffer) > before_tick)
+  end, 20), "stage did not settle inside the linked worktree")
+  assert(git({ "diff", "--cached", "--name-only" }, worktree_dir) == "f.txt",
+    "staging inside a linked worktree must affect only that worktree's own index")
+  -- The main repo's own worktree must be completely unaffected.
+  assert(git({ "status", "--porcelain" }, main_repo) == "",
+    "a linked worktree's action must not leak into the main repository's worktree")
+  assert(#currantgit.errors() == 0, table.concat(currantgit.errors(), "\n"))
+
+  vim.cmd("cd " .. vim.fn.fnameescape(original_cwd))
+  git({ "worktree", "remove", "-f", worktree_dir }, main_repo)
+  vim.fn.delete(main_repo, "rf")
+end
+
+-- 19. Submodules (audit continuation item 7): a submodule's own working
+-- copy also has a `.git` FILE (`gitdir: ../.git/modules/<name>`) pointing
+-- into the parent's `.git/modules`. `repository_root()` must resolve to the
+-- submodule's own directory when run from inside it (submodules are fully
+-- independent repositories from Git's perspective), and status/diff/stage
+-- must work against the submodule itself. Separately: a submodule with
+-- uncommitted changes inside it (but an unchanged recorded commit pointer)
+-- cannot be staged from the parent at all -- that is normal, documented
+-- Git submodule behavior (only a changed gitlink/commit pointer is
+-- stageable), not a CurrantGit bug, and is recorded here so it is not
+-- mistaken for one later.
+local function test_submodule()
+  local submodule_source = make_repo()
+  write_file(submodule_source .. "/s.txt", "sub\n")
+  git({ "add", "s.txt" }, submodule_source)
+  git({ "commit", "-q", "-m", "sub base" }, submodule_source)
+
+  local parent = make_repo()
+  write_file(parent .. "/f.txt", "one\n")
+  git({ "add", "f.txt" }, parent)
+  git({ "commit", "-q", "-m", "base" }, parent)
+  git({ "-c", "protocol.file.allow=always", "submodule", "add", "-q", submodule_source, "sub" }, parent)
+  git({ "commit", "-q", "-m", "add submodule" }, parent)
+
+  local submodule_path = parent .. "/sub"
+  write_file(submodule_path .. "/s.txt", "sub\nchanged\n")
+
+  vim.cmd("cd " .. vim.fn.fnameescape(submodule_path))
+  open_status_and_wait()
+  assert_contains(vim.api.nvim_buf_get_lines(0, 0, -1, false), "s.txt")
+  goto_item("s.txt")
+  local before_buffer = vim.api.nvim_get_current_buf()
+  local before_tick = vim.api.nvim_buf_get_changedtick(before_buffer)
+  local stage_mapping = vim.fn.maparg("s", "n", false, true)
+  assert(stage_mapping.callback, "stage mapping was not registered")
+  stage_mapping.callback()
+  -- Wait for CurrantGit's own post-stage refresh, not just real Git state
+  -- (see the identical reasoning in test_linked_worktree) -- this test
+  -- later deletes `parent`/`submodule_source`, and the submodule's `.git`
+  -- file points into `parent/.git/modules/sub`.
+  assert(vim.wait(8000, function()
+    return vim.tbl_contains(changed_paths({ "diff", "--cached", "--name-only" }, submodule_path), "s.txt")
+      and vim.bo.filetype == "currantgit"
+      and (vim.api.nvim_get_current_buf() ~= before_buffer
+        or vim.api.nvim_buf_get_changedtick(before_buffer) > before_tick)
+  end, 20), "stage did not settle inside the submodule")
+  assert(git({ "diff", "--cached", "--name-only" }, submodule_path) == "s.txt",
+    "staging inside a submodule's own working copy must affect only its own index")
+
+  -- Commit inside the submodule so its recorded commit pointer actually
+  -- changes, then confirm the parent can stage exactly that gitlink change.
+  git({ "commit", "-q", "-m", "sub change" }, submodule_path)
+  vim.cmd("cd " .. vim.fn.fnameescape(parent))
+  open_status_and_wait()
+  goto_item("sub")
+  local before_parent_buffer = vim.api.nvim_get_current_buf()
+  local before_parent_tick = vim.api.nvim_buf_get_changedtick(before_parent_buffer)
+  local parent_stage_mapping = vim.fn.maparg("s", "n", false, true)
+  assert(parent_stage_mapping.callback, "stage mapping was not registered")
+  parent_stage_mapping.callback()
+  assert(vim.wait(8000, function()
+    return vim.tbl_contains(changed_paths({ "diff", "--cached", "--name-only" }, parent), "sub")
+      and vim.bo.filetype == "currantgit"
+      and (vim.api.nvim_get_current_buf() ~= before_parent_buffer
+        or vim.api.nvim_buf_get_changedtick(before_parent_buffer) > before_parent_tick)
+  end, 20), "staging a submodule's changed commit pointer from the parent did not settle")
+  assert(#currantgit.errors() == 0, table.concat(currantgit.errors(), "\n"))
+
+  vim.cmd("cd " .. vim.fn.fnameescape(original_cwd))
+  vim.fn.delete(parent, "rf")
+  vim.fn.delete(submodule_source, "rf")
+end
+
+-- 20. `unquote_diff_path`'s C-style control-character escapes (found in PR
+-- review, PR #18): Git's diff-header quoting uses the full C string-literal
+-- escape set for control characters -- not just `\t`/`\n`/`\"`/`\\`, but
+-- also `\a` (bell), `\b` (backspace), `\f` (form feed), `\r` (carriage
+-- return), and `\v` (vertical tab). Verified empirically against real Git
+-- for all of them. The original fallback for an unrecognized single-char
+-- escape silently dropped the backslash and kept the letter, so `\r`
+-- (carriage return) decoded to the literal letter `r` instead of a CR byte
+-- -- corrupting `hunk.path` for a real, valid filename, exactly the
+-- "reasoned about, not exercised end-to-end" gap this PR was supposed to
+-- close. Combines a leading dash, a unicode byte, and a literal CR in one
+-- filename (the reviewer's exact repro) to also confirm octal-decoding and
+-- named-escape-decoding compose correctly in the same quoted path.
+local function test_diff_unquote_full_control_escape_set()
+  local diff = require("currantgit.diff")
+  local repo = make_repo()
+  local name = "-caf\xc3\xa9\rdragon.txt"
+  write_file(repo .. "/" .. name, "one\n")
+  git({ "add", "." }, repo)
+  git({ "commit", "-q", "-m", "base" }, repo)
+  write_file(repo .. "/" .. name, "one\ntwo\n")
+
+  local result = vim.system(
+    { "git", "diff", "--no-color", "--", ":(literal)" .. name },
+    { cwd = repo, text = true }
+  ):wait()
+  assert(result.code == 0, result.stderr)
+  assert(result.stdout:find('\\303\\251', 1, true), "fixture diff should contain the octal-escaped unicode byte")
+  assert(result.stdout:find("\\r", 1, true), "fixture diff should contain the named \\r escape, not a raw CR")
+
+  local _, _, _, hunks = diff.parse(result.stdout, { mode = "working", path = name })
+  assert(#hunks == 1, "expected exactly one hunk")
+  assert(hunks[1].path == name,
+    "hunk.path must be the real filename (including the raw CR byte), got: " .. vim.inspect(hunks[1].path))
+
+  vim.fn.delete(repo, "rf")
+end
+
 test_cwd_race()
 test_glob_pathspec()
 test_blame_multiline()
 test_diff_trailing_binary()
 test_status_rename_and_status_codes()
 test_diff_mode_trust()
+test_git_command_quoted_args()
+test_bare_repository_refuses_cleanly()
+test_detached_head()
+test_unborn_branch()
+test_hunk_stage_no_trailing_newline()
+test_hunk_stage_sequential_multi_hunk()
+test_hunk_stage_atomic_on_conflict()
+test_hunk_stage_pinned_to_render_time_not_worktree()
+test_unusual_paths_end_to_end()
+test_diff_multi_pathspec_hunk_paths()
+test_open_deleted_colon_in_filename()
+test_linked_worktree()
+test_submodule()
+test_diff_unquote_full_control_escape_set()
 assert(#currantgit.errors() == 0, table.concat(currantgit.errors(), "\n"))
 print("CurrantGit safety: ok")
