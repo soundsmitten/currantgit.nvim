@@ -26,6 +26,44 @@ local open_diff_args
 local set_buffer
 local attach_diff
 local attach_log
+local toggle_status_help
+
+local status_namespace = vim.api.nvim_create_namespace("currantgit_status")
+
+local function define_highlights()
+  local links = {
+    CurrantGitRepository = "Title",
+    CurrantGitBranch = "Identifier",
+    CurrantGitHeading = "Directory",
+    CurrantGitCount = "Number",
+    CurrantGitStatusAdded = "DiffAdd",
+    CurrantGitStatusDeleted = "DiffDelete",
+    CurrantGitStatusModified = "DiffChange",
+    CurrantGitStatusRenamed = "Special",
+    CurrantGitStatusUntracked = "Comment",
+    CurrantGitPath = "Normal",
+    CurrantGitAction = "SpecialKey",
+    CurrantGitHelpHeading = "Title",
+    CurrantGitHelpKey = "SpecialKey",
+    CurrantGitHelpDescription = "Comment",
+  }
+  for group, target in pairs(links) do
+    vim.api.nvim_set_hl(0, group, { default = true, link = target })
+  end
+end
+
+local function apply_status_highlights(buffer, highlights, start_line)
+  start_line = start_line or 0
+  vim.api.nvim_buf_clear_namespace(buffer, status_namespace, start_line, -1)
+  for _, highlight in ipairs(highlights or {}) do
+    if highlight.line - 1 >= start_line then
+      vim.api.nvim_buf_set_extmark(buffer, status_namespace, highlight.line - 1, highlight.start_col, {
+        end_col = highlight.end_col,
+        hl_group = highlight.group,
+      })
+    end
+  end
+end
 
 local function schedule(callback)
   vim.schedule(function()
@@ -184,10 +222,61 @@ local function update_discovery(buffer)
       labels[#labels + 1] = action.key .. " " .. action.label
     end
   end
-  local line = #labels > 0 and "Actions: " .. table.concat(labels, "   ") or "Actions: r refresh   g? help"
+  local discovery = #labels > 0 and "Actions: " .. table.concat(labels, "   ") or "Actions: r refresh   g? help"
+  local footer_start = vim.b[buffer].currantgit_footer_start
+  if type(footer_start) ~= "number" then
+    footer_start = vim.api.nvim_buf_line_count(buffer)
+    vim.b[buffer].currantgit_footer_start = footer_start
+  end
+  local lines = { discovery }
+  local highlights = {
+    { line = footer_start, start_col = 0, end_col = #discovery, group = "CurrantGitAction" },
+  }
+  if vim.b[buffer].currantgit_help_open then
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = "Available actions"
+    highlights[#highlights + 1] = {
+      line = footer_start + #lines - 1,
+      start_col = 0,
+      end_col = #lines[#lines],
+      group = "CurrantGitHelpHeading",
+    }
+    for _, action in ipairs(available) do
+      if action.key then
+        local help_line = action.key .. "   " .. action.desc
+        lines[#lines + 1] = help_line
+        highlights[#highlights + 1] = {
+          line = footer_start + #lines - 1,
+          start_col = 0,
+          end_col = #action.key,
+          group = "CurrantGitHelpKey",
+        }
+        highlights[#highlights + 1] = {
+          line = footer_start + #lines - 1,
+          start_col = #action.key + 3,
+          end_col = #help_line,
+          group = "CurrantGitHelpDescription",
+        }
+      end
+    end
+  end
+  local line_count = vim.api.nvim_buf_line_count(buffer)
   set_modifiable(buffer, function()
-    vim.api.nvim_buf_set_lines(buffer, -2, -1, false, { line })
+    vim.api.nvim_buf_set_lines(buffer, footer_start - 1, line_count, false, lines)
   end)
+  local fold_levels = vim.b[buffer].currantgit_fold_levels
+  for line = footer_start, line_count + #lines do fold_levels[line] = nil end
+  for offset = 0, #lines - 1 do fold_levels[footer_start + offset] = 0 end
+  apply_status_highlights(buffer, highlights, footer_start - 1)
+end
+
+toggle_status_help = function(buffer)
+  if not vim.api.nvim_buf_is_valid(buffer) or vim.b[buffer].currantgit_title ~= "status" then
+    return false
+  end
+  vim.b[buffer].currantgit_help_open = not vim.b[buffer].currantgit_help_open
+  update_discovery(buffer)
+  return true
 end
 
 local function action_context(buffer)
@@ -234,6 +323,14 @@ local function action_context(buffer)
     buffer = buffer,
     root = root,
     refresh = refresh,
+    help = function(item)
+      if toggle_status_help(buffer) then return end
+      local labels = {}
+      for _, available_action in ipairs(actions.discovery(item, { buffer = buffer })) do
+        labels[#labels + 1] = available_action.key .. " " .. available_action.label
+      end
+      vim.notify("CurrantGit: " .. table.concat(labels, "   "), vim.log.levels.INFO)
+    end,
     open = function(item)
       navigation.update(0)
       if item.change_kind == "deleted" then
@@ -479,7 +576,7 @@ attach_log = function(buffer)
   update_discovery(buffer)
 end
 
-set_buffer = function(lines, items, title, line_items, root, fold_levels)
+set_buffer = function(lines, items, title, line_items, root, fold_levels, highlights)
   local name = "currantgit://" .. title
   local buffer = vim.fn.bufnr(name)
   if buffer < 0 or not vim.api.nvim_buf_is_valid(buffer) then
@@ -501,6 +598,14 @@ set_buffer = function(lines, items, title, line_items, root, fold_levels)
   vim.b[buffer].currantgit_fold_levels = fold_levels or {}
   vim.b[buffer].currantgit_root = root
   vim.b[buffer].currantgit_title = title
+  if title == "status" or title == "log" then
+    vim.b[buffer].currantgit_footer_start = #lines
+  end
+  if title == "status" then
+    vim.b[buffer].currantgit_help_open = false
+    vim.b[buffer].currantgit_status_highlights = highlights or {}
+    apply_status_highlights(buffer, highlights)
+  end
   vim.wo.foldmethod = (title == "status" or title == "diff") and "expr" or "manual"
   if title == "status" or title == "diff" then
     vim.wo.foldexpr = "v:lua.require'currantgit'.foldexpr(v:lnum)"
@@ -668,6 +773,15 @@ local function parse_status(stdout)
   local line_items = {}
   local fold_levels = {}
   local section_nodes = {}
+  local highlights = {}
+  local function highlight(line, start_col, end_col, group)
+    highlights[#highlights + 1] = {
+      line = line,
+      start_col = start_col,
+      end_col = end_col,
+      group = group,
+    }
+  end
   local sections = {
     staged = { label = "Staged changes", items = {} },
     unstaged = { label = "Unstaged changes", items = {} },
@@ -734,9 +848,14 @@ local function parse_status(stdout)
 
   if ui.show_branch then
     lines[#lines + 1] = "Branch: " .. (branch ~= "" and branch or "detached")
+    highlight(#lines, 0, #lines[#lines], "CurrantGitBranch")
   end
+  highlight(1, 0, #header, "CurrantGitRepository")
   lines[#lines + 1] = ""
   lines[#lines + 1] = ui.show_counts and string.format("Changes (%d)", #items) or "Changes"
+  highlight(#lines, 0, #lines[#lines], "CurrantGitHeading")
+  local count_start = lines[#lines]:find("(", 1, true)
+  if count_start then highlight(#lines, count_start - 1, #lines[#lines], "CurrantGitCount") end
   fold_levels[#lines] = 0
   local section_order = { "staged", "unstaged", "untracked", "conflicts" }
   for _, section_kind in ipairs(section_order) do
@@ -753,11 +872,26 @@ local function parse_status(stdout)
       }
       section_nodes[#section_nodes + 1] = node
       lines[#lines + 1] = string.format("%s (%d)", section.label, #section.items)
+      highlight(#lines, 0, #lines[#lines], "CurrantGitHeading")
+      local section_count_start = lines[#lines]:find("(", 1, true)
+      if section_count_start then highlight(#lines, section_count_start - 1, #lines[#lines], "CurrantGitCount") end
       line_items[#lines] = node
       fold_levels[#lines] = ">1"
       for _, item in ipairs(section.items) do
         local label = item.old_path and (item.old_path .. " -> " .. item.path) or item.path
-        lines[#lines + 1] = string.format("  %s  %s", ui.icons[item.change_kind] or item.status, label)
+        local marker = ui.icons[item.change_kind] or item.status
+        lines[#lines + 1] = string.format("%s %s", marker, label)
+        local marker_group = ({
+          added = "CurrantGitStatusAdded",
+          deleted = "CurrantGitStatusDeleted",
+          modified = "CurrantGitStatusModified",
+          renamed = "CurrantGitStatusRenamed",
+          copied = "CurrantGitStatusRenamed",
+          untracked = "CurrantGitStatusUntracked",
+          conflict = "CurrantGitStatusDeleted",
+        })[item.change_kind] or "CurrantGitStatusModified"
+        highlight(#lines, 0, #marker, marker_group)
+        highlight(#lines, #marker + 1, #lines[#lines], "CurrantGitPath")
         line_items[#lines] = item
         fold_levels[#lines] = 2
       end
@@ -771,7 +905,7 @@ local function parse_status(stdout)
   fold_levels[#lines] = "<1"
   lines[#lines + 1] = ""
   fold_levels[#lines] = 0
-  return lines, items, line_items, fold_levels, section_nodes
+  return lines, items, line_items, fold_levels, section_nodes, highlights
 end
 
 open_status = function(root)
@@ -793,8 +927,8 @@ open_status = function(root)
         vim.notify("CurrantGit: " .. (result.stderr or "git status failed"), vim.log.levels.ERROR)
         return
       end
-      local lines, items, line_items, fold_levels, section_nodes = parse_status(result.stdout or "")
-      set_buffer(lines, items, "status", line_items, root, fold_levels)
+      local lines, items, line_items, fold_levels, section_nodes, highlights = parse_status(result.stdout or "")
+      set_buffer(lines, items, "status", line_items, root, fold_levels, highlights)
       vim.b.currantgit_sections = section_nodes
     end)
   end)
@@ -876,6 +1010,7 @@ end
 
 function M.setup(opts)
   state.opts = config.setup(opts)
+  define_highlights()
   if state.configured then
     return M
   end
@@ -983,11 +1118,7 @@ function M.setup(opts)
     label = "help",
     key = "g?",
     run = function(context, item)
-      local labels = {}
-      for _, action in ipairs(actions.discovery(item, context)) do
-        labels[#labels + 1] = action.key .. " " .. action.label
-      end
-      vim.notify("CurrantGit: " .. table.concat(labels, "   "), vim.log.levels.INFO)
+      context.help(item)
       return true
     end,
   })

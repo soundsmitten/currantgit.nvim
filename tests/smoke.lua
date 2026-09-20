@@ -210,6 +210,10 @@ end)
 assert(vim.bo.filetype == "currantgit", "Git status did not open a CurrantGit surface")
 assert_no_async_errors()
 local lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
+assert_contains(lines, "M tracked.txt")
+for _, line in ipairs(lines) do
+  assert(not line:find("^  M  tracked%.txt$"), "status rows should use compact marker/path spacing")
+end
 assert(not lines[1]:find("CurrantGit", 1, true), "default status header should not contain the plugin name")
 assert_contains(lines, "Changes")
 assert(vim.b.currantgit_items, "status surface did not expose semantic items")
@@ -245,9 +249,45 @@ assert(action_ids["item.toggle"], "change is missing the toggle action")
 assert(action_ids["item.discard"], "unstaged change is missing the discard action")
 assert(not action_ids["item.unstage"], "unstaged change should not expose unstage")
 assert(action_ids["surface.refresh"], "surface is missing the refresh action")
-assert_contains(vim.api.nvim_buf_get_lines(0, -2, -1, false), "Actions:")
+assert_contains(vim.api.nvim_buf_get_lines(0, 0, -1, false), "Actions:")
 
 local status_buffer = vim.api.nvim_get_current_buf()
+local status_namespace = vim.api.nvim_create_namespace("currantgit_status")
+local status_marks = vim.api.nvim_buf_get_extmarks(status_buffer, status_namespace, 0, -1, { details = true })
+local status_groups = {}
+for _, mark in ipairs(status_marks) do status_groups[mark[4].hl_group] = true end
+for _, group in ipairs({
+  "CurrantGitRepository",
+  "CurrantGitBranch",
+  "CurrantGitHeading",
+  "CurrantGitCount",
+  "CurrantGitStatusModified",
+  "CurrantGitPath",
+  "CurrantGitAction",
+}) do
+  assert(status_groups[group], "status projection is missing highlight group " .. group)
+end
+
+local help_mapping = vim.fn.maparg("g?", "n", false, true)
+assert(help_mapping.callback, "status help mapping was not registered")
+local notified = false
+local original_notify = vim.notify
+vim.notify = function() notified = true end
+help_mapping.callback()
+vim.notify = original_notify
+assert(not notified, "status help should render in the buffer instead of notifying")
+lines = vim.api.nvim_buf_get_lines(status_buffer, 0, -1, false)
+assert_contains(lines, "Available actions")
+assert_contains(lines, "s   stage")
+local help_line = vim.fn.search("Available actions", "nw")
+assert(help_line > 0, "status help should be searchable buffer text")
+assert(vim.fn.foldlevel(help_line) == 0, "status help should remain outside status folds")
+assert(vim.b[status_buffer].currantgit_line_items[vim.api.nvim_win_get_cursor(0)[1]].id == current_item.id,
+  "opening help changed semantic item targeting")
+help_mapping.callback()
+lines = vim.api.nvim_buf_get_lines(status_buffer, 0, -1, false)
+for _, line in ipairs(lines) do assert(line ~= "Available actions", "second g? should close inline help") end
+
 local diff_mapping = vim.fn.maparg("d", "n", false, true)
 assert(diff_mapping.callback, "diff mapping was not registered")
 diff_mapping.callback()
@@ -315,6 +355,14 @@ assert(refresh_mapping.callback, "refresh mapping was not registered")
 wait_for_status_refresh(function() refresh_mapping.callback() end)
 assert_no_async_errors()
 assert(vim.api.nvim_get_current_buf() == status_buffer, "refresh created a duplicate status buffer")
+status_marks = vim.api.nvim_buf_get_extmarks(status_buffer, status_namespace, 0, -1, { details = true })
+local unique_status_marks = {}
+for _, mark in ipairs(status_marks) do
+  local details = mark[4]
+  local key = table.concat({ mark[2], mark[3], details.end_col or -1, details.hl_group or "" }, ":")
+  assert(not unique_status_marks[key], "status refresh accumulated a duplicate highlight")
+  unique_status_marks[key] = true
+end
 
 goto_item("tracked.txt")
 local stage_mapping = vim.fn.maparg("s", "n", false, true)

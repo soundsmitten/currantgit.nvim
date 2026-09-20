@@ -51,7 +51,7 @@ u                       Unstage the file.
 -                       Toggle the file's staged state.
 X                       Discard working-tree changes after confirmation.
 r                       Refresh the status surface.
-g?                      Show the available status actions.
+g?                      Toggle available status actions as inline buffer text.
 
 The discovery line is generated from the same action metadata as the mappings.
 It is a hint, not a second keymap definition.
@@ -61,6 +61,28 @@ Integrations can use `require('currantgit').discovery()` for structured
 `require('currantgit').which_key()` for a WhichKey-compatible mapping table.
 Both projections are contextual to the item under the cursor. They return an
 empty table when called for an ordinary or invalid buffer.
+
+Status metadata uses colorscheme-friendly highlight groups. Users may define
+these groups before setup to override the default links:
+
+CurrantGitRepository        Repository heading (Title)
+CurrantGitBranch            Branch metadata (Identifier)
+CurrantGitHeading           Status and section headings (Directory)
+CurrantGitCount             Change counts (Number)
+CurrantGitStatusAdded       Added markers (DiffAdd)
+CurrantGitStatusDeleted     Deleted/conflict markers (DiffDelete)
+CurrantGitStatusModified    Modified markers (DiffChange)
+CurrantGitStatusRenamed     Renamed/copied markers (Special)
+CurrantGitStatusUntracked   Untracked markers (Comment)
+CurrantGitPath              Repository-relative paths (Normal)
+CurrantGitAction            Compact discovery line (SpecialKey)
+CurrantGitHelpHeading       Inline-help heading (Title)
+CurrantGitHelpKey           Inline-help keys (SpecialKey)
+CurrantGitHelpDescription   Inline-help descriptions (Comment)
+
+The inline help is ordinary read-only buffer content derived from the same
+contextual action registry as the mappings and compact discovery line. It can
+be searched and yanked; pressing g? again removes it.
 
 The diff action opens a read-only diff surface. Hunk headers are native fold
 roots, so |fold-commands| can collapse or reopen each hunk.
