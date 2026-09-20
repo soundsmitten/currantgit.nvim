@@ -119,6 +119,29 @@ these, see [`decisions/`](decisions/).
   path unconditionally, regardless of what the path itself contains. See
   [`decisions/0012`](decisions/0012-open-deleted-explicit-index-stage.md).
 
+- **A linked worktree's or a submodule's `.git` is a FILE, not a
+  directory**, containing `gitdir: <path>`, pointing into the main
+  repository's `.git/worktrees/<name>` (worktrees) or
+  `.git/modules/<name>` (submodules). `git rev-parse --show-toplevel` run
+  from inside either still correctly resolves to that worktree's/
+  submodule's OWN working-directory root, not the main repository's --
+  verified empirically, no special-casing needed in `repository_root()`.
+  A submodule is a fully independent repository from Git's perspective:
+  status/diff/stage all operate on it directly when run from inside it.
+
+- **A submodule with uncommitted changes inside it cannot be staged from
+  the parent repository at all, even though `git status` in the parent
+  shows it as `M <name>`.** This is normal Git behavior, not a bug: the
+  parent only ever tracks a submodule by its recorded commit SHA (the
+  "gitlink"), and `git add <submodule-path>` has nothing to stage unless
+  that recorded commit actually changed. A "dirty" submodule (uncommitted
+  changes, same commit checked out) has no staged representation at the
+  parent level -- staging only becomes possible once a real commit is made
+  *inside* the submodule, which changes the gitlink the parent tracks. Don't
+  mistake a silent, exit-0 no-op `git add` on a dirty submodule for a
+  CurrantGit stage-action bug. See
+  [`decisions/0013`](decisions/0013-worktrees-and-submodules-verified-safe.md).
+
 - **A multi-file diff's *last* file having no `@@` hunk** (binary, pure
   mode/chmod change, 100%-similarity rename, empty file add/delete) is a
   normal, valid diff shape, not an edge case. A parser that assumes the

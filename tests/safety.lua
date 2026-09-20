@@ -947,6 +947,129 @@ local function test_open_deleted_colon_in_filename()
   vim.fn.delete(repo, "rf")
 end
 
+-- 18. Linked worktrees (audit continuation item 7): a linked worktree's
+-- `.git` is a FILE (`gitdir: <path>/.git/worktrees/<name>`), not a
+-- directory, and its git-dir lives under the main repo's `.git`. Verify
+-- `repository_root()` (`git rev-parse --show-toplevel`) still resolves to
+-- the worktree's OWN directory, not the main repo's, and that status/diff/
+-- stage all work correctly from inside it.
+local function test_linked_worktree()
+  local main_repo = make_repo()
+  write_file(main_repo .. "/f.txt", "one\n")
+  git({ "add", "f.txt" }, main_repo)
+  git({ "commit", "-q", "-m", "base" }, main_repo)
+
+  local worktree_dir = vim.fn.tempname()
+  git({ "worktree", "add", "-q", "-b", "feature", worktree_dir }, main_repo)
+  write_file(worktree_dir .. "/f.txt", "one\ntwo\n")
+
+  vim.cmd("cd " .. vim.fn.fnameescape(worktree_dir))
+  open_status_and_wait()
+  assert_contains(vim.api.nvim_buf_get_lines(0, 0, -1, false), "f.txt")
+  goto_item("f.txt")
+
+  local before_buffer = vim.api.nvim_get_current_buf()
+  local before_tick = vim.api.nvim_buf_get_changedtick(before_buffer)
+  local stage_mapping = vim.fn.maparg("s", "n", false, true)
+  assert(stage_mapping.callback, "stage mapping was not registered")
+  stage_mapping.callback()
+  -- Wait for CurrantGit's OWN post-stage refresh to finish (not just real
+  -- Git state) before this test deletes `main_repo` below -- that repo's
+  -- `.git/worktrees/...` metadata is what every git command run from
+  -- `worktree_dir` depends on, so a still-in-flight refresh racing the
+  -- delete reproduces the exact ENOENT class of bug documented in
+  -- docs/gotchas.md.
+  assert(vim.wait(8000, function()
+    return vim.tbl_contains(changed_paths({ "diff", "--cached", "--name-only" }, worktree_dir), "f.txt")
+      and vim.bo.filetype == "currantgit"
+      and (vim.api.nvim_get_current_buf() ~= before_buffer
+        or vim.api.nvim_buf_get_changedtick(before_buffer) > before_tick)
+  end, 20), "stage did not settle inside the linked worktree")
+  assert(git({ "diff", "--cached", "--name-only" }, worktree_dir) == "f.txt",
+    "staging inside a linked worktree must affect only that worktree's own index")
+  -- The main repo's own worktree must be completely unaffected.
+  assert(git({ "status", "--porcelain" }, main_repo) == "",
+    "a linked worktree's action must not leak into the main repository's worktree")
+  assert(#currantgit.errors() == 0, table.concat(currantgit.errors(), "\n"))
+
+  vim.cmd("cd " .. vim.fn.fnameescape(original_cwd))
+  git({ "worktree", "remove", "-f", worktree_dir }, main_repo)
+  vim.fn.delete(main_repo, "rf")
+end
+
+-- 19. Submodules (audit continuation item 7): a submodule's own working
+-- copy also has a `.git` FILE (`gitdir: ../.git/modules/<name>`) pointing
+-- into the parent's `.git/modules`. `repository_root()` must resolve to the
+-- submodule's own directory when run from inside it (submodules are fully
+-- independent repositories from Git's perspective), and status/diff/stage
+-- must work against the submodule itself. Separately: a submodule with
+-- uncommitted changes inside it (but an unchanged recorded commit pointer)
+-- cannot be staged from the parent at all -- that is normal, documented
+-- Git submodule behavior (only a changed gitlink/commit pointer is
+-- stageable), not a CurrantGit bug, and is recorded here so it is not
+-- mistaken for one later.
+local function test_submodule()
+  local submodule_source = make_repo()
+  write_file(submodule_source .. "/s.txt", "sub\n")
+  git({ "add", "s.txt" }, submodule_source)
+  git({ "commit", "-q", "-m", "sub base" }, submodule_source)
+
+  local parent = make_repo()
+  write_file(parent .. "/f.txt", "one\n")
+  git({ "add", "f.txt" }, parent)
+  git({ "commit", "-q", "-m", "base" }, parent)
+  git({ "-c", "protocol.file.allow=always", "submodule", "add", "-q", submodule_source, "sub" }, parent)
+  git({ "commit", "-q", "-m", "add submodule" }, parent)
+
+  local submodule_path = parent .. "/sub"
+  write_file(submodule_path .. "/s.txt", "sub\nchanged\n")
+
+  vim.cmd("cd " .. vim.fn.fnameescape(submodule_path))
+  open_status_and_wait()
+  assert_contains(vim.api.nvim_buf_get_lines(0, 0, -1, false), "s.txt")
+  goto_item("s.txt")
+  local before_buffer = vim.api.nvim_get_current_buf()
+  local before_tick = vim.api.nvim_buf_get_changedtick(before_buffer)
+  local stage_mapping = vim.fn.maparg("s", "n", false, true)
+  assert(stage_mapping.callback, "stage mapping was not registered")
+  stage_mapping.callback()
+  -- Wait for CurrantGit's own post-stage refresh, not just real Git state
+  -- (see the identical reasoning in test_linked_worktree) -- this test
+  -- later deletes `parent`/`submodule_source`, and the submodule's `.git`
+  -- file points into `parent/.git/modules/sub`.
+  assert(vim.wait(8000, function()
+    return vim.tbl_contains(changed_paths({ "diff", "--cached", "--name-only" }, submodule_path), "s.txt")
+      and vim.bo.filetype == "currantgit"
+      and (vim.api.nvim_get_current_buf() ~= before_buffer
+        or vim.api.nvim_buf_get_changedtick(before_buffer) > before_tick)
+  end, 20), "stage did not settle inside the submodule")
+  assert(git({ "diff", "--cached", "--name-only" }, submodule_path) == "s.txt",
+    "staging inside a submodule's own working copy must affect only its own index")
+
+  -- Commit inside the submodule so its recorded commit pointer actually
+  -- changes, then confirm the parent can stage exactly that gitlink change.
+  git({ "commit", "-q", "-m", "sub change" }, submodule_path)
+  vim.cmd("cd " .. vim.fn.fnameescape(parent))
+  open_status_and_wait()
+  goto_item("sub")
+  local before_parent_buffer = vim.api.nvim_get_current_buf()
+  local before_parent_tick = vim.api.nvim_buf_get_changedtick(before_parent_buffer)
+  local parent_stage_mapping = vim.fn.maparg("s", "n", false, true)
+  assert(parent_stage_mapping.callback, "stage mapping was not registered")
+  parent_stage_mapping.callback()
+  assert(vim.wait(8000, function()
+    return vim.tbl_contains(changed_paths({ "diff", "--cached", "--name-only" }, parent), "sub")
+      and vim.bo.filetype == "currantgit"
+      and (vim.api.nvim_get_current_buf() ~= before_parent_buffer
+        or vim.api.nvim_buf_get_changedtick(before_parent_buffer) > before_parent_tick)
+  end, 20), "staging a submodule's changed commit pointer from the parent did not settle")
+  assert(#currantgit.errors() == 0, table.concat(currantgit.errors(), "\n"))
+
+  vim.cmd("cd " .. vim.fn.fnameescape(original_cwd))
+  vim.fn.delete(parent, "rf")
+  vim.fn.delete(submodule_source, "rf")
+end
+
 test_cwd_race()
 test_glob_pathspec()
 test_blame_multiline()
@@ -964,5 +1087,7 @@ test_hunk_stage_pinned_to_render_time_not_worktree()
 test_unusual_paths_end_to_end()
 test_diff_multi_pathspec_hunk_paths()
 test_open_deleted_colon_in_filename()
+test_linked_worktree()
+test_submodule()
 assert(#currantgit.errors() == 0, table.concat(currantgit.errors(), "\n"))
 print("CurrantGit safety: ok")
