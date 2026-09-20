@@ -151,8 +151,15 @@ local function set_modifiable(buffer, callback)
 end
 
 local function current_item(buffer)
+  if not vim.api.nvim_buf_is_valid(buffer) then
+    return nil
+  end
+  local line_items = vim.b[buffer].currantgit_line_items
+  if type(line_items) ~= "table" then
+    return nil
+  end
   local line = vim.api.nvim_win_get_cursor(0)[1]
-  local item = vim.b[buffer].currantgit_line_items[line]
+  local item = line_items[line]
   return type(item) == "table" and item or nil
 end
 
@@ -1038,11 +1045,17 @@ end
 
 function M.discovery(buffer)
   buffer = buffer or vim.api.nvim_get_current_buf()
+  if not vim.api.nvim_buf_is_valid(buffer) or type(vim.b[buffer].currantgit_line_items) ~= "table" then
+    return {}
+  end
   return actions.discovery(current_item(buffer), { buffer = buffer })
 end
 
 function M.which_key(buffer)
   buffer = buffer or vim.api.nvim_get_current_buf()
+  if not vim.api.nvim_buf_is_valid(buffer) or type(vim.b[buffer].currantgit_line_items) ~= "table" then
+    return {}
+  end
   return actions.which_key(current_item(buffer), action_context(buffer))
 end
 

@@ -187,6 +187,14 @@ these, see [`decisions/`](decisions/).
 
 ## Neovim / test harness
 
+- **A valid buffer ID does not make a saved cursor or window view valid after
+  that buffer is reused.** A refreshed status, diff, or log projection may
+  contain fewer or shorter lines than it did when `winsaveview()` and
+  `nvim_win_get_cursor()` captured it. Before calling `winrestview()` or
+  `nvim_win_set_cursor()`, clamp the saved line, byte column, and view fields
+  against the buffer's current contents. Skip history entries whose buffers
+  are no longer valid.
+
 - **A Lua `nvim_create_user_command` callback's `args` field is the raw,
   unprocessed `<args>` text, not quote-aware.** `:help nvim_create_user_command()`
   documents `args` as "Args passed to the command, if any. `<args>`" — the

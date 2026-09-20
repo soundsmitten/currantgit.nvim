@@ -8,6 +8,87 @@ local function assert_contains(lines, needle)
 end
 
 local currantgit = require("currantgit")
+local navigation = require("currantgit.navigation")
+
+-- A valid reused buffer can become shorter while another view is current.
+-- Back/forward navigation must reconcile its saved cursor and view with the
+-- buffer's current contents instead of replaying stale coordinates verbatim.
+do
+  local window = vim.api.nvim_get_current_win()
+  local original_buffer = vim.api.nvim_get_current_buf()
+  local shrinking_buffer = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_win_set_buf(window, shrinking_buffer)
+  local long_lines = {}
+  for line = 1, 100 do long_lines[line] = "line " .. line .. " with a long tail" end
+  vim.api.nvim_buf_set_lines(shrinking_buffer, 0, -1, false, long_lines)
+  vim.api.nvim_win_set_cursor(window, { 90, 20 })
+  vim.cmd("normal! zt")
+  navigation.reset(window)
+  navigation.visit(window)
+
+  local destination_buffer = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_win_set_buf(window, destination_buffer)
+  vim.api.nvim_buf_set_lines(destination_buffer, 0, -1, false, { "destination" })
+  navigation.visit(window)
+  vim.api.nvim_buf_set_lines(shrinking_buffer, 0, -1, false, { "short" })
+
+  local back_mapping = vim.fn.maparg("<C-O>", "n", false, true)
+  assert(back_mapping.callback, "navigation regression back mapping was not registered")
+  back_mapping.callback()
+  assert(vim.api.nvim_get_current_buf() == shrinking_buffer, "back did not restore the shortened buffer")
+  assert(vim.deep_equal(vim.api.nvim_win_get_cursor(window), { 1, 4 }), "back did not clamp the stale cursor")
+  local restored_view = vim.fn.winsaveview()
+  assert(restored_view.lnum == 1 and restored_view.topline == 1, "back did not clamp the stale saved view")
+
+  local forward_mapping = vim.fn.maparg("<C-S-I>", "n", false, true)
+  assert(forward_mapping.callback, "navigation regression forward mapping was not registered")
+  forward_mapping.callback()
+  assert(vim.api.nvim_get_current_buf() == destination_buffer, "forward did not restore the destination buffer")
+
+  vim.api.nvim_buf_set_lines(shrinking_buffer, 0, -1, false, {})
+  back_mapping = vim.fn.maparg("<C-O>", "n", false, true)
+  back_mapping.callback()
+  assert(vim.deep_equal(vim.api.nvim_win_get_cursor(window), { 1, 0 }), "back did not handle an empty projection")
+
+  navigation.reset(window)
+  local first_buffer = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_win_set_buf(window, first_buffer)
+  navigation.visit(window)
+  local deleted_buffer = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_win_set_buf(window, deleted_buffer)
+  navigation.visit(window)
+  local last_buffer = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_win_set_buf(window, last_buffer)
+  navigation.visit(window)
+  vim.api.nvim_buf_delete(deleted_buffer, { force = true })
+  back_mapping = vim.fn.maparg("<C-O>", "n", false, true)
+  back_mapping.callback()
+  assert(vim.api.nvim_get_current_buf() == first_buffer, "back did not skip an invalid history buffer")
+  forward_mapping = vim.fn.maparg("<C-S-I>", "n", false, true)
+  forward_mapping.callback()
+  assert(vim.api.nvim_get_current_buf() == last_buffer, "forward did not skip an invalid history buffer")
+
+  navigation.reset(window)
+  vim.api.nvim_win_set_buf(window, original_buffer)
+  vim.api.nvim_buf_delete(shrinking_buffer, { force = true })
+  vim.api.nvim_buf_delete(destination_buffer, { force = true })
+  vim.api.nvim_buf_delete(first_buffer, { force = true })
+  vim.api.nvim_buf_delete(last_buffer, { force = true })
+end
+
+local ordinary_buffer = vim.api.nvim_get_current_buf()
+assert(vim.b[ordinary_buffer].currantgit_line_items == nil, "API regression requires an ordinary buffer")
+local discovery_ok, ordinary_discovery = pcall(currantgit.discovery, ordinary_buffer)
+assert(discovery_ok, "public discovery crashed outside a CurrantGit buffer")
+assert(vim.tbl_isempty(ordinary_discovery), "public discovery should be empty outside a CurrantGit buffer")
+local which_key_ok, ordinary_which_key = pcall(currantgit.which_key, ordinary_buffer)
+assert(which_key_ok, "public which_key crashed outside a CurrantGit buffer")
+assert(vim.tbl_isempty(ordinary_which_key), "public which_key should be empty outside a CurrantGit buffer")
+local invalid_buffer = vim.api.nvim_create_buf(false, true)
+vim.api.nvim_buf_delete(invalid_buffer, { force = true })
+assert(vim.tbl_isempty(currantgit.discovery(invalid_buffer)), "public discovery should be empty for an invalid buffer")
+assert(vim.tbl_isempty(currantgit.which_key(invalid_buffer)), "public which_key should be empty for an invalid buffer")
+
 local defaults = currantgit.get_config()
 assert(defaults.ui.title == nil, "status headers should default to the repository name")
 assert(defaults.ui.icons.modified == "M", "configuration icon defaults are not loaded")
@@ -136,6 +217,16 @@ end)
 for _, hunk in ipairs(vim.b.currantgit_diff_hunks or {}) do
   assert(hunk.path ~= "tracked.txt", "unstaging a hunk should remove that path from the staged diff")
 end
+local emptied_diff_back_mapping = vim.fn.maparg("<C-O>", "n", false, true)
+assert(emptied_diff_back_mapping.callback, "emptied diff back mapping was not registered")
+emptied_diff_back_mapping.callback()
+local emptied_diff_cursor = vim.api.nvim_win_get_cursor(0)
+local emptied_diff_line_count = vim.api.nvim_buf_line_count(0)
+assert(emptied_diff_cursor[1] >= 1 and emptied_diff_cursor[1] <= emptied_diff_line_count,
+  "back restored an invalid cursor after the staged diff became empty")
+local emptied_diff_forward_mapping = vim.fn.maparg("<C-S-I>", "n", false, true)
+assert(emptied_diff_forward_mapping.callback, "emptied diff forward mapping was not registered")
+emptied_diff_forward_mapping.callback()
 local staged_diff_buffer = vim.api.nvim_get_current_buf()
 vim.cmd("Git status")
 vim.wait(5000, function() return vim.bo.filetype == "currantgit" and vim.b.currantgit_title == "status" end)
