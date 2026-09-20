@@ -405,24 +405,28 @@ local function test_git_command_quoted_args()
 
   vim.cmd("cd " .. vim.fn.fnameescape(repo))
   vim.cmd([[Git commit -m "two words"]])
-  assert(vim.wait(3000, function()
+  -- A generous timeout: each predicate here shells out for real (`git log`),
+  -- and under host CPU contention a real `git commit` + `git log` round trip
+  -- can occasionally take longer than a tight timeout allows, producing a
+  -- false failure unrelated to argument-splitting correctness.
+  assert(vim.wait(8000, function()
     return git({ "log", "-1", "--format=%s" }, repo) == "two words"
-  end, 10), "quoted multi-word :Git commit argument was not preserved as one argv element")
+  end, 20), "quoted multi-word :Git commit argument was not preserved as one argv element")
   assert(git({ "status", "--porcelain" }, repo) == "", "commit should have left the worktree clean")
 
   write_file(repo .. "/f.txt", "one\ntwo\nthree\n")
   git({ "add", "f.txt" }, repo)
   vim.cmd([[Git commit -m 'single-quoted words too']])
-  assert(vim.wait(3000, function()
+  assert(vim.wait(8000, function()
     return git({ "log", "-1", "--format=%s" }, repo) == "single-quoted words too"
-  end, 10), "single-quoted multi-word :Git commit argument was not preserved as one argv element")
+  end, 20), "single-quoted multi-word :Git commit argument was not preserved as one argv element")
 
   write_file(repo .. "/f.txt", "one\ntwo\nthree\nfour\n")
   git({ "add", "f.txt" }, repo)
   vim.cmd([[Git commit -m "quote: \"nested\""]])
-  assert(vim.wait(3000, function()
+  assert(vim.wait(8000, function()
     return git({ "log", "-1", "--format=%s" }, repo) == 'quote: "nested"'
-  end, 10), "escaped double-quote inside a quoted argument was not preserved")
+  end, 20), "escaped double-quote inside a quoted argument was not preserved")
 
   -- An unterminated quote is malformed input: refuse cleanly and touch
   -- nothing, rather than guessing where the argument was meant to end.
@@ -786,6 +790,15 @@ local function test_unusual_paths_end_to_end()
 
   vim.cmd("cd " .. vim.fn.fnameescape(repo))
 
+  -- Waits below use a longer timeout and coarser poll interval than the
+  -- rest of this file: this test drives five real async actions per path
+  -- across three paths, several of which (`changed_paths`) shell out to
+  -- real `git` inside the poll predicate itself. A tight interval can
+  -- re-spawn `git` hundreds of times over a few seconds, which under host
+  -- CPU contention can starve the very thing it's waiting on and produce a
+  -- false "did not settle" (observed in practice on a loaded machine). Real
+  -- settling normally takes well under a second; 8s stays comfortably above
+  -- that noise floor without masking a genuine hang.
   for _, path in ipairs(paths) do
     open_status_and_wait()
     goto_item(path)
@@ -794,11 +807,11 @@ local function test_unusual_paths_end_to_end()
     local before_tick = vim.api.nvim_buf_get_changedtick(before_buffer)
     local diff_mapping = vim.fn.maparg("d", "n", false, true)
     diff_mapping.callback()
-    assert(vim.wait(3000, function()
+    assert(vim.wait(8000, function()
       return vim.bo.filetype == "diff"
         and (vim.api.nvim_get_current_buf() ~= before_buffer
           or vim.api.nvim_buf_get_changedtick(before_buffer) > before_tick)
-    end, 10), "diff did not open for " .. path)
+    end, 20), "diff did not open for " .. path)
     assert_contains(vim.api.nvim_buf_get_lines(0, 0, -1, false), "+two")
     for _, item in pairs(vim.b.currantgit_line_items or {}) do
       if type(item) == "table" and item.kind == "hunk" then
@@ -811,18 +824,18 @@ local function test_unusual_paths_end_to_end()
     goto_item(path)
     local stage_mapping = vim.fn.maparg("s", "n", false, true)
     stage_mapping.callback()
-    assert(vim.wait(3000, function()
+    assert(vim.wait(8000, function()
       local staged = changed_paths({ "diff", "--cached", "--name-only" }, repo)
       return vim.tbl_contains(staged, path)
-    end, 10), "stage did not settle for " .. path)
+    end, 50), "stage did not settle for " .. path)
 
     open_status_and_wait()
     goto_item(path)
     local unstage_mapping = vim.fn.maparg("u", "n", false, true)
     unstage_mapping.callback()
-    assert(vim.wait(3000, function()
+    assert(vim.wait(8000, function()
       return not vim.tbl_contains(changed_paths({ "diff", "--cached", "--name-only" }, repo), path)
-    end, 10), "unstage did not settle for " .. path)
+    end, 50), "unstage did not settle for " .. path)
     local unstaged = changed_paths({ "diff", "--name-only" }, repo)
     assert(vim.tbl_contains(unstaged, path), "the file should be back to unstaged-modified")
 
@@ -831,9 +844,9 @@ local function test_unusual_paths_end_to_end()
     local before_blame_buffer = vim.api.nvim_get_current_buf()
     local blame_mapping = vim.fn.maparg("b", "n", false, true)
     blame_mapping.callback()
-    assert(vim.wait(3000, function()
+    assert(vim.wait(8000, function()
       return vim.api.nvim_get_current_buf() ~= before_blame_buffer and vim.bo.filetype == "git"
-    end, 10), "blame did not open for " .. path)
+    end, 20), "blame did not open for " .. path)
     assert_contains(vim.api.nvim_buf_get_lines(0, 0, -1, false), "one")
 
     open_status_and_wait()
@@ -842,12 +855,12 @@ local function test_unusual_paths_end_to_end()
     vim.ui.select = function(_, _, callback) callback("Discard", 1) end
     local discard_mapping = vim.fn.maparg("X", "n", false, true)
     discard_mapping.callback()
-    assert(vim.wait(3000, function()
+    assert(vim.wait(8000, function()
       for _, item in ipairs(vim.b.currantgit_items or {}) do
         if item.path == path then return false end
       end
       return true
-    end, 10), "discard did not settle for " .. path)
+    end, 20), "discard did not settle for " .. path)
     vim.ui.select = original_select
     assert(read_file(repo .. "/" .. path) == "one\n", "discard did not revert " .. path)
   end
@@ -855,6 +868,36 @@ local function test_unusual_paths_end_to_end()
   for _, path in ipairs(paths) do
     assert(read_file(repo .. "/" .. path) == "one\n", path .. " must be back to its committed content")
   end
+  assert(#currantgit.errors() == 0, table.concat(currantgit.errors(), "\n"))
+
+  vim.cmd("cd " .. vim.fn.fnameescape(original_cwd))
+  vim.fn.delete(repo, "rf")
+end
+
+-- 16. `open_diff_args`'s single-pathspec fallback extraction (audit
+-- continuation item 5): `:Git diff -- a.txt b.txt` (two pathspecs) only
+-- ever records `a.txt` as the naive `options.path` fallback. Verify this is
+-- NOT a live bug: each file's own `diff --git`/`+++` header supplies its
+-- own real path (per decision 0011's header-path extraction), independent
+-- of which pathspec was passed on the command line, so every hunk still
+-- gets the correct path regardless of the fallback's ambiguity.
+local function test_diff_multi_pathspec_hunk_paths()
+  local repo = make_repo()
+  write_file(repo .. "/a.txt", "one\n")
+  write_file(repo .. "/b.txt", "one\n")
+  git({ "add", "." }, repo)
+  git({ "commit", "-q", "-m", "base" }, repo)
+  write_file(repo .. "/a.txt", "one\ntwo\n")
+  write_file(repo .. "/b.txt", "one\nthree\n")
+
+  vim.cmd("cd " .. vim.fn.fnameescape(repo))
+  open_diff_and_wait({ "diff", "--", "a.txt", "b.txt" })
+  local seen = {}
+  for _, item in pairs(vim.b.currantgit_line_items or {}) do
+    if type(item) == "table" and item.kind == "hunk" then seen[item.path] = true end
+  end
+  assert(seen["a.txt"], "expected a hunk with path a.txt")
+  assert(seen["b.txt"], "expected a hunk with path b.txt, not the first pathspec reused")
   assert(#currantgit.errors() == 0, table.concat(currantgit.errors(), "\n"))
 
   vim.cmd("cd " .. vim.fn.fnameescape(original_cwd))
@@ -876,5 +919,6 @@ test_hunk_stage_sequential_multi_hunk()
 test_hunk_stage_atomic_on_conflict()
 test_hunk_stage_pinned_to_render_time_not_worktree()
 test_unusual_paths_end_to_end()
+test_diff_multi_pathspec_hunk_paths()
 assert(#currantgit.errors() == 0, table.concat(currantgit.errors(), "\n"))
 print("CurrantGit safety: ok")
