@@ -187,6 +187,14 @@ these, see [`decisions/`](decisions/).
 
 ## Neovim / test harness
 
+- **A valid buffer ID does not make a saved cursor or window view valid after
+  that buffer is reused.** A refreshed status, diff, or log projection may
+  contain fewer or shorter lines than it did when `winsaveview()` and
+  `nvim_win_get_cursor()` captured it. Before calling `winrestview()` or
+  `nvim_win_set_cursor()`, clamp the saved line, byte column, and view fields
+  against the buffer's current contents. Skip history entries whose buffers
+  are no longer valid.
+
 - **A Lua `nvim_create_user_command` callback's `args` field is the raw,
   unprocessed `<args>` text, not quote-aware.** `:help nvim_create_user_command()`
   documents `args` as "Args passed to the command, if any. `<args>`" — the
@@ -219,3 +227,12 @@ these, see [`decisions/`](decisions/).
   specific action finished — a buffer's `changedtick` increasing, a genuine
   buffer switch, or a semantic value changing — not a flag a stale render
   can already satisfy.
+
+- **A valid buffer (`nvim_buf_is_valid` true) can still be unloaded**
+  (`:bunload` without `!`, or any plugin freeing memory the same way), and
+  `nvim_buf_line_count`/`nvim_buf_get_lines` report it as having 0 lines
+  until something reloads it. `nvim_win_set_buf(window, buffer)` triggers
+  that reload as a side effect. Reading line count/content to reconcile a
+  saved cursor *before* switching the window to the buffer therefore
+  measures the wrong (0-line) state; switch first, then reconcile against
+  the now-loaded buffer.

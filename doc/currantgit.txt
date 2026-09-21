@@ -59,7 +59,8 @@ It is a hint, not a second keymap definition.
 Integrations can use `require('currantgit').discovery()` for structured
 `id`, `key`, `label`, and `desc` entries, or
 `require('currantgit').which_key()` for a WhichKey-compatible mapping table.
-Both projections are contextual to the item under the cursor.
+Both projections are contextual to the item under the cursor. They return an
+empty table when called for an ordinary or invalid buffer.
 
 The diff action opens a read-only diff surface. Hunk headers are native fold
 roots, so |fold-commands| can collapse or reopen each hunk.
@@ -149,9 +150,12 @@ history:
 CTRL-O                  Move back through CurrantGit view history.
 CTRL-SHIFT-I            Move forward through CurrantGit view history.
 
-The view history preserves the buffer, cursor, and window view. When the local
-CurrantGit history is exhausted, the key falls through to normal Neovim jump
-navigation. CurrantGit does not globally redefine these keys.
+The view history preserves the buffer, cursor, and window view. If a reused
+surface became shorter since it was recorded, CurrantGit restores the nearest
+valid cursor and view instead of replaying stale coordinates. Invalid deleted
+buffers are skipped. When the local CurrantGit history is exhausted, the key
+falls through to normal Neovim jump navigation. CurrantGit does not globally
+redefine these keys.
 
 This documents CurrantGit’s boundary behavior; see |:help jump-motions| for
 Neovim’s underlying navigation semantics.

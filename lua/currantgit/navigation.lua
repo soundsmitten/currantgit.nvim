@@ -22,13 +22,38 @@ local function same_position(left, right)
     and left.cursor[2] == right.cursor[2]
 end
 
+local function clamp(value, minimum, maximum)
+  return math.min(math.max(value or minimum, minimum), maximum)
+end
+
+local function reconciled_position(entry)
+  local line_count = vim.api.nvim_buf_line_count(entry.buffer)
+  local line = clamp(entry.cursor[1], 1, line_count)
+  local text = vim.api.nvim_buf_get_lines(entry.buffer, line - 1, line, false)[1] or ""
+  local column = clamp(entry.cursor[2], 0, math.max(#text - 1, 0))
+  local view = vim.deepcopy(entry.view or {})
+  view.lnum = line
+  view.col = column
+  view.topline = clamp(view.topline, 1, line)
+  view.topfill = math.max(view.topfill or 0, 0)
+  view.leftcol = math.max(view.leftcol or 0, 0)
+  view.skipcol = math.max(view.skipcol or 0, 0)
+  return { line, column }, view
+end
+
 local function restore(window, entry)
   if not vim.api.nvim_buf_is_valid(entry.buffer) then
     return false
   end
+  -- Switch the window to the buffer before reading its line count: a valid
+  -- buffer can be unloaded (`:bunload` without `!`), in which case its line
+  -- count reads as 0 until nvim_win_set_buf loads it back in. Reconciling
+  -- against a stale 0-line count clamps the cursor to line 0, which is
+  -- itself out of range and reproduces the E5108 this fix is meant to avoid.
   vim.api.nvim_win_set_buf(window, entry.buffer)
-  vim.api.nvim_win_set_cursor(window, entry.cursor)
-  vim.fn.winrestview(entry.view)
+  local cursor, view = reconciled_position(entry)
+  vim.fn.winrestview(view)
+  vim.api.nvim_win_set_cursor(window, cursor)
   return true
 end
 
@@ -72,23 +97,27 @@ end
 function M.back(window)
   local history = state_for(window)
   M.update(window)
-  if history.index <= 1 then
-    vim.api.nvim_feedkeys(vim.keycode("<C-O>"), "n", false)
-    return false
+  for index = history.index - 1, 1, -1 do
+    if restore(window, history.entries[index]) then
+      history.index = index
+      return true
+    end
   end
-  history.index = history.index - 1
-  return restore(window, history.entries[history.index])
+  vim.api.nvim_feedkeys(vim.keycode("<C-O>"), "n", false)
+  return false
 end
 
 function M.forward(window)
   local history = state_for(window)
   M.update(window)
-  if history.index >= #history.entries then
-    vim.api.nvim_feedkeys(vim.keycode("<C-I>"), "n", false)
-    return false
+  for index = history.index + 1, #history.entries do
+    if restore(window, history.entries[index]) then
+      history.index = index
+      return true
+    end
   end
-  history.index = history.index + 1
-  return restore(window, history.entries[history.index])
+  vim.api.nvim_feedkeys(vim.keycode("<C-I>"), "n", false)
+  return false
 end
 
 function M.reset(window)
