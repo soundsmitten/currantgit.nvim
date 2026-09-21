@@ -76,6 +76,75 @@ do
   vim.api.nvim_buf_delete(last_buffer, { force = true })
 end
 
+-- A history entry's buffer can be valid but unloaded (`:bunload` without
+-- `!`) when navigation returns to it. Its line count reads as 0 until the
+-- window is switched to it, which previously reconciled the stale cursor
+-- against that 0-line count before the buffer was reloaded.
+do
+  local window = vim.api.nvim_get_current_win()
+  local original_buffer = vim.api.nvim_get_current_buf()
+  local unloadable_buffer = vim.api.nvim_create_buf(true, false)
+  vim.api.nvim_buf_set_lines(unloadable_buffer, 0, -1, false, { "one", "two", "three", "four", "five" })
+  vim.api.nvim_win_set_buf(window, unloadable_buffer)
+  vim.api.nvim_win_set_cursor(window, { 5, 0 })
+  navigation.reset(window)
+  navigation.visit(window)
+
+  local other_buffer = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_win_set_buf(window, other_buffer)
+  navigation.visit(window)
+
+  vim.bo[unloadable_buffer].modified = false
+  vim.cmd("bunload " .. unloadable_buffer)
+  assert(vim.api.nvim_buf_is_valid(unloadable_buffer), "unload regression requires a still-valid buffer")
+  assert(not vim.api.nvim_buf_is_loaded(unloadable_buffer), "unload regression requires an unloaded buffer")
+
+  local back_mapping = vim.fn.maparg("<C-O>", "n", false, true)
+  local ok = pcall(back_mapping.callback)
+  assert(ok, "back crashed restoring a valid-but-unloaded history buffer")
+  assert(vim.api.nvim_get_current_buf() == unloadable_buffer, "back did not restore the unloaded buffer")
+
+  navigation.reset(window)
+  vim.api.nvim_win_set_buf(window, original_buffer)
+  vim.api.nvim_buf_delete(unloadable_buffer, { force = true })
+  vim.api.nvim_buf_delete(other_buffer, { force = true })
+end
+
+-- discovery()/which_key() accept an explicit buffer argument, so they must
+-- read the cursor from a window actually showing that buffer, not from
+-- whichever window happens to be focused.
+do
+  local buffer = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_lines(buffer, 0, -1, false, { "header", "item-a", "item-b" })
+  vim.b[buffer].currantgit_line_items = { [2] = { id = "marker-a" }, [3] = { id = "marker-b" } }
+  local window = vim.api.nvim_get_current_win()
+  vim.api.nvim_win_set_buf(window, buffer)
+  vim.api.nvim_win_set_cursor(window, { 2, 0 })
+
+  vim.cmd("split")
+  local other_window = vim.api.nvim_get_current_win()
+  local other_buffer = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_lines(other_buffer, 0, -1, false, { "x", "y", "z" })
+  vim.api.nvim_win_set_buf(other_window, other_buffer)
+  vim.api.nvim_win_set_cursor(other_window, { 3, 0 })
+
+  local actions_module = require("currantgit.actions")
+  local captured_item
+  local original_discovery = actions_module.discovery
+  actions_module.discovery = function(item, ctx)
+    captured_item = item
+    return original_discovery(item, ctx)
+  end
+  currantgit.discovery(buffer)
+  actions_module.discovery = original_discovery
+  assert(captured_item and captured_item.id == "marker-a",
+    "discovery() should read the cursor from the requested buffer's own window, not the focused window")
+
+  vim.cmd("close")
+  vim.api.nvim_buf_delete(buffer, { force = true })
+  vim.api.nvim_buf_delete(other_buffer, { force = true })
+end
+
 local ordinary_buffer = vim.api.nvim_get_current_buf()
 assert(vim.b[ordinary_buffer].currantgit_line_items == nil, "API regression requires an ordinary buffer")
 local discovery_ok, ordinary_discovery = pcall(currantgit.discovery, ordinary_buffer)

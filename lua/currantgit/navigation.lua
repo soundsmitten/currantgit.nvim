@@ -45,8 +45,13 @@ local function restore(window, entry)
   if not vim.api.nvim_buf_is_valid(entry.buffer) then
     return false
   end
-  local cursor, view = reconciled_position(entry)
+  -- Switch the window to the buffer before reading its line count: a valid
+  -- buffer can be unloaded (`:bunload` without `!`), in which case its line
+  -- count reads as 0 until nvim_win_set_buf loads it back in. Reconciling
+  -- against a stale 0-line count clamps the cursor to line 0, which is
+  -- itself out of range and reproduces the E5108 this fix is meant to avoid.
   vim.api.nvim_win_set_buf(window, entry.buffer)
+  local cursor, view = reconciled_position(entry)
   vim.fn.winrestview(view)
   vim.api.nvim_win_set_cursor(window, cursor)
   return true

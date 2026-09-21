@@ -227,3 +227,12 @@ these, see [`decisions/`](decisions/).
   specific action finished — a buffer's `changedtick` increasing, a genuine
   buffer switch, or a semantic value changing — not a flag a stale render
   can already satisfy.
+
+- **A valid buffer (`nvim_buf_is_valid` true) can still be unloaded**
+  (`:bunload` without `!`, or any plugin freeing memory the same way), and
+  `nvim_buf_line_count`/`nvim_buf_get_lines` report it as having 0 lines
+  until something reloads it. `nvim_win_set_buf(window, buffer)` triggers
+  that reload as a side effect. Reading line count/content to reconcile a
+  saved cursor *before* switching the window to the buffer therefore
+  measures the wrong (0-line) state; switch first, then reconcile against
+  the now-loaded buffer.

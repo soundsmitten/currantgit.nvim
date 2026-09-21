@@ -150,16 +150,25 @@ local function set_modifiable(buffer, callback)
   vim.bo[buffer].readonly = was_readonly
 end
 
+local function is_currantgit_buffer(buffer)
+  return vim.api.nvim_buf_is_valid(buffer) and type(vim.b[buffer].currantgit_line_items) == "table"
+end
+
 local function current_item(buffer)
-  if not vim.api.nvim_buf_is_valid(buffer) then
+  if not is_currantgit_buffer(buffer) then
     return nil
   end
-  local line_items = vim.b[buffer].currantgit_line_items
-  if type(line_items) ~= "table" then
+  -- Read the cursor from a window actually showing `buffer`, not window 0:
+  -- callers (M.discovery/M.which_key) accept an explicit buffer argument,
+  -- and window 0's cursor belongs to whatever buffer is currently focused,
+  -- which need not be `buffer` when it's shown in a background split or not
+  -- shown at all.
+  local window = vim.fn.bufwinid(buffer)
+  if window == -1 then
     return nil
   end
-  local line = vim.api.nvim_win_get_cursor(0)[1]
-  local item = line_items[line]
+  local line = vim.api.nvim_win_get_cursor(window)[1]
+  local item = vim.b[buffer].currantgit_line_items[line]
   return type(item) == "table" and item or nil
 end
 
@@ -1045,7 +1054,7 @@ end
 
 function M.discovery(buffer)
   buffer = buffer or vim.api.nvim_get_current_buf()
-  if not vim.api.nvim_buf_is_valid(buffer) or type(vim.b[buffer].currantgit_line_items) ~= "table" then
+  if not is_currantgit_buffer(buffer) then
     return {}
   end
   return actions.discovery(current_item(buffer), { buffer = buffer })
@@ -1053,7 +1062,7 @@ end
 
 function M.which_key(buffer)
   buffer = buffer or vim.api.nvim_get_current_buf()
-  if not vim.api.nvim_buf_is_valid(buffer) or type(vim.b[buffer].currantgit_line_items) ~= "table" then
+  if not is_currantgit_buffer(buffer) then
     return {}
   end
   return actions.which_key(current_item(buffer), action_context(buffer))
