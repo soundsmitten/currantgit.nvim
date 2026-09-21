@@ -284,6 +284,29 @@ assert(help_line > 0, "status help should be searchable buffer text")
 assert(vim.fn.foldlevel(help_line) == 0, "status help should remain outside status folds")
 assert(vim.b[status_buffer].currantgit_line_items[vim.api.nvim_win_get_cursor(0)[1]].id == current_item.id,
   "opening help changed semantic item targeting")
+
+-- Moving the cursor into the open help region should not collapse it: the
+-- footer has no line item, and a CursorMoved-triggered discovery refresh
+-- there must not treat "no item" as a reason to shrink the footer back to
+-- its single-line default while the user is reading/yanking help text.
+local help_line_count_before_move = #lines
+vim.api.nvim_win_set_cursor(0, { help_line, 0 })
+vim.api.nvim_exec_autocmds("CursorMoved", { buffer = status_buffer })
+local lines_with_cursor_in_help = vim.api.nvim_buf_get_lines(status_buffer, 0, -1, false)
+assert(#lines_with_cursor_in_help == help_line_count_before_move,
+  "moving the cursor into open help should not collapse the footer")
+goto_item("tracked.txt")
+
+-- A refresh (e.g. after staging/unstaging, or a plain `r`) must not
+-- silently close help the user explicitly opened.
+local help_refresh_mapping = vim.fn.maparg("r", "n", false, true)
+assert(help_refresh_mapping.callback, "refresh mapping was not registered")
+wait_for_status_refresh(function() help_refresh_mapping.callback() end)
+assert(vim.b[status_buffer].currantgit_help_open == true, "a status refresh should not close previously-open help")
+lines = vim.api.nvim_buf_get_lines(status_buffer, 0, -1, false)
+assert_contains(lines, "Available actions")
+goto_item("tracked.txt")
+
 help_mapping.callback()
 lines = vim.api.nvim_buf_get_lines(status_buffer, 0, -1, false)
 for _, line in ipairs(lines) do assert(line ~= "Available actions", "second g? should close inline help") end

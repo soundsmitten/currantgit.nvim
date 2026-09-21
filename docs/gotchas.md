@@ -236,3 +236,11 @@ these, see [`decisions/`](decisions/).
   saved cursor *before* switching the window to the buffer therefore
   measures the wrong (0-line) state; switch first, then reconcile against
   the now-loaded buffer.
+
+- **`vim.b[buffer].some_table` returns a fresh copy on every index, not a
+  live reference.** Mutating it in place (`local t = vim.b[buf].x; t.k =
+  v`, or even the chained `vim.b[buf].x.k = v`) silently discards the
+  change — confirmed empirically, it round-trips through the same
+  serialize/deserialize boundary as any other `vim.b`/`vim.g`/`vim.w`
+  access. To persist a change, build the new table value and assign it
+  back with a direct `vim.b[buffer].x = new_table`.

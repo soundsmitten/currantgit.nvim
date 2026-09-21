@@ -264,9 +264,13 @@ local function update_discovery(buffer)
   set_modifiable(buffer, function()
     vim.api.nvim_buf_set_lines(buffer, footer_start - 1, line_count, false, lines)
   end)
-  local fold_levels = vim.b[buffer].currantgit_fold_levels
+  -- vim.b[buffer].x returns a fresh copy on each index, so mutating the
+  -- table in place would silently discard the changes; copy, mutate, then
+  -- write the whole table back with a direct assignment.
+  local fold_levels = vim.deepcopy(vim.b[buffer].currantgit_fold_levels or {})
   for line = footer_start, line_count + #lines do fold_levels[line] = nil end
   for offset = 0, #lines - 1 do fold_levels[footer_start + offset] = 0 end
+  vim.b[buffer].currantgit_fold_levels = fold_levels
   apply_status_highlights(buffer, highlights, footer_start - 1)
 end
 
@@ -319,14 +323,19 @@ local function action_context(buffer)
       open_status(root)
     end
   end
-  return {
+  local context
+  context = {
     buffer = buffer,
     root = root,
     refresh = refresh,
     help = function(item)
       if toggle_status_help(buffer) then return end
+      -- Pass the full context (not just `buffer`) so this fallback matches
+      -- what actions.discovery receives everywhere else the action
+      -- registry is consulted, in case an is_available predicate ever
+      -- inspects context fields beyond `buffer`.
       local labels = {}
-      for _, available_action in ipairs(actions.discovery(item, { buffer = buffer })) do
+      for _, available_action in ipairs(actions.discovery(item, context)) do
         labels[#labels + 1] = available_action.key .. " " .. available_action.label
       end
       vim.notify("CurrantGit: " .. table.concat(labels, "   "), vim.log.levels.INFO)
@@ -381,6 +390,7 @@ local function action_context(buffer)
       end)
     end,
   }
+  return context
 end
 
 open_deleted = function(item, root)
@@ -543,6 +553,15 @@ local function attach_status(buffer)
     group = group,
     buffer = buffer,
     callback = function()
+      -- Skip while the cursor is inside the footer/help region itself: it
+      -- has no line item, so recomputing discovery there would collapse
+      -- open inline help (whose text the user may be reading or yanking)
+      -- back down to the single default line out from under the cursor.
+      local footer_start = vim.b[buffer].currantgit_footer_start
+      local cursor_line = vim.api.nvim_win_get_cursor(0)[1]
+      if type(footer_start) == "number" and cursor_line >= footer_start then
+        return
+      end
       update_discovery(buffer)
     end,
   })
@@ -602,7 +621,11 @@ set_buffer = function(lines, items, title, line_items, root, fold_levels, highli
     vim.b[buffer].currantgit_footer_start = #lines
   end
   if title == "status" then
-    vim.b[buffer].currantgit_help_open = false
+    -- Preserve an already-open help panel across a reused buffer's refresh
+    -- (`r`, stage/unstage/discard, ...): defaulting unconditionally to
+    -- false here closes help on every refresh, contradicting the
+    -- documented "pressing g? again removes it" toggle contract.
+    vim.b[buffer].currantgit_help_open = vim.b[buffer].currantgit_help_open or false
     vim.b[buffer].currantgit_status_highlights = highlights or {}
     apply_status_highlights(buffer, highlights)
   end
