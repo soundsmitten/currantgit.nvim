@@ -6,7 +6,6 @@ M.defaults = {
   },
   ui = {
     title = nil,
-    show_clean = true,
     show_branch = true,
     show_counts = true,
     icons = {
@@ -28,7 +27,7 @@ local function validate(config)
   if config.ui.title ~= nil and (type(config.ui.title) ~= "string" or config.ui.title == "") then
     error("CurrantGit: ui.title must be nil or a non-empty string")
   end
-  for _, key in ipairs({ "show_clean", "show_branch", "show_counts" }) do
+  for _, key in ipairs({ "show_branch", "show_counts" }) do
     if type(config.ui[key]) ~= "boolean" then
       error("CurrantGit: ui." .. key .. " must be a boolean")
     end

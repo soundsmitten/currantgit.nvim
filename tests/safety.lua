@@ -1127,6 +1127,136 @@ local function test_diff_unquote_full_control_escape_set()
   vim.fn.delete(repo, "rf")
 end
 
+-- docs/issues/0004: `=` toggles a change item's diff inline in the status
+-- buffer, using the comparison of whichever section the row is under
+-- (index-vs-HEAD for staged, worktree-vs-index for unstaged) -- a file with
+-- both staged and unstaged changes renders as two rows sharing one item
+-- identity, so this must resolve from the row under the cursor, not the
+-- item alone. `=` on a section heading keeps toggling the native fold.
+local function test_inline_diff_toggle()
+  local repo = make_repo()
+  write_file(repo .. "/mixed.txt", "one\ntwo\nthree\n")
+  write_file(repo .. "/b.txt", "z\n")
+  git({ "add", "." }, repo)
+  git({ "commit", "-q", "-m", "base" }, repo)
+  write_file(repo .. "/mixed.txt", "ONE\ntwo\nthree\n")
+  git({ "add", "--", "mixed.txt" }, repo)
+  write_file(repo .. "/mixed.txt", "ONE\ntwo\nTHREE\n")
+  write_file(repo .. "/staged_only.txt", "a\n")
+  git({ "add", "--", "staged_only.txt" }, repo)
+  write_file(repo .. "/b.txt", "B\n")
+  write_file(repo .. "/untracked.txt", "new\n")
+
+  vim.cmd("cd " .. vim.fn.fnameescape(repo))
+  open_status_and_wait()
+
+  local function goto_item_in_section(path, heading_prefix)
+    local lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
+    local current_heading
+    for line, text in ipairs(lines) do
+      if text:match("^%u%l+ .* %(%d+%)$") then current_heading = text end
+      local item = vim.b.currantgit_line_items[line]
+      if type(item) == "table" and item.path == path
+        and current_heading and vim.startswith(current_heading, heading_prefix) then
+        vim.api.nvim_win_set_cursor(0, { line, 0 })
+        return
+      end
+    end
+    error("could not find " .. path .. " under a heading starting with " .. heading_prefix)
+  end
+
+  local eq_mapping = vim.fn.maparg("=", "n", false, true)
+  assert(eq_mapping.callback, "= mapping was not registered")
+
+  goto_item_in_section("mixed.txt", "Staged")
+  local before = vim.api.nvim_buf_line_count(0)
+  eq_mapping.callback()
+  assert(vim.wait(2000, function() return vim.api.nvim_buf_line_count(0) > before end, 10),
+    "staged row did not expand")
+  local body = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
+  assert(body:find("%-one") and body:find("%+ONE"), "staged expansion should be index-vs-HEAD (one -> ONE)")
+  assert(not body:find("%-two") and not body:find("%+two"),
+    "staged expansion must not show the unstaged three->THREE hunk")
+
+  eq_mapping.callback()
+  vim.wait(500)
+  assert(vim.api.nvim_buf_line_count(0) == before, "second = should fully collapse the expansion")
+
+  goto_item_in_section("mixed.txt", "Unstaged")
+  before = vim.api.nvim_buf_line_count(0)
+  eq_mapping.callback()
+  assert(vim.wait(2000, function() return vim.api.nvim_buf_line_count(0) > before end, 10),
+    "unstaged row did not expand")
+  body = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
+  assert(body:find("%-three") and body:find("%+THREE"), "unstaged expansion should be worktree-vs-index (three -> THREE)")
+  assert(not body:find("%-one") and not body:find("%+ONE"),
+    "unstaged expansion must not show the staged one->ONE hunk")
+
+  -- A second file can be expanded independently while the first stays open.
+  goto_item_in_section("staged_only.txt", "Staged")
+  before = vim.api.nvim_buf_line_count(0)
+  eq_mapping.callback()
+  assert(vim.wait(2000, function() return vim.api.nvim_buf_line_count(0) > before end, 10),
+    "staged_only.txt did not expand")
+  body = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
+  assert(body:find("%-three") and body:find("%+THREE"), "mixed.txt's expansion should survive a sibling expanding")
+
+  -- Untracked items don't offer a well-defined single comparison.
+  goto_item_in_section("untracked.txt", "Untracked")
+  local discovery = currantgit.discovery()
+  for _, action in ipairs(discovery) do
+    assert(action.id ~= "item.diff_toggle", "untracked items should not offer the inline diff toggle")
+  end
+  local before_untracked = vim.api.nvim_buf_line_count(0)
+  assert(pcall(eq_mapping.callback), "= on an untracked item should not error")
+  vim.wait(300)
+  assert(vim.api.nvim_buf_line_count(0) == before_untracked, "= on an untracked item should be a no-op")
+
+  -- = on a section heading still just toggles the native fold.
+  local staged_heading = vim.fn.search("^Staged changes", "nw")
+  assert(staged_heading > 0, "staged heading not found")
+  vim.api.nvim_win_set_cursor(0, { staged_heading, 0 })
+  assert(vim.fn.foldclosed(staged_heading) == -1, "staged section should start open")
+  eq_mapping.callback()
+  vim.wait(100)
+  assert(vim.fn.foldclosed(staged_heading) == staged_heading, "= on a heading should close its native fold")
+  eq_mapping.callback()
+  assert(vim.fn.foldclosed(staged_heading) == -1, "= on a heading should reopen its native fold")
+
+  -- A refresh keeps an expansion alive for a change that still exists...
+  local refresh_mapping = vim.fn.maparg("r", "n", false, true)
+  assert(refresh_mapping.callback, "refresh mapping was not registered")
+  local function refresh_and_wait()
+    local status_buffer = vim.api.nvim_get_current_buf()
+    local tick = vim.api.nvim_buf_get_changedtick(status_buffer)
+    refresh_mapping.callback()
+    assert(vim.wait(3000, function()
+      return vim.api.nvim_buf_get_changedtick(status_buffer) > tick
+    end, 10), "status refresh did not settle")
+  end
+  refresh_and_wait()
+  body = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
+  assert(body:find("%-three") and body:find("%+THREE"), "a refresh should preserve expansion for a still-existing change")
+
+  -- ...but drops it once the underlying change is gone, without leaving
+  -- stale content or crashing (docs/issues/0004: "removes state for
+  -- vanished changes").
+  git({ "add", "--", "mixed.txt" }, repo)
+  refresh_and_wait()
+  body = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
+  assert(not body:find("%+THREE"), "expansion for a change that vanished (got staged away) must not linger")
+  assert(body:find("Unstaged changes %(1%)"), "b.txt, still genuinely unstaged, should remain listed")
+
+  -- None of the above touched the repository -- this is a read-only slice.
+  assert(git({ "status", "--porcelain" }, repo):find("staged_only%.txt"),
+    "inline diff toggling must never mutate the index or worktree")
+  assert(git({ "status", "--porcelain" }, repo):find("untracked%.txt"),
+    "inline diff toggling must never mutate the index or worktree")
+
+  vim.cmd("cd " .. vim.fn.fnameescape(original_cwd))
+  vim.fn.delete(repo, "rf")
+end
+
 test_cwd_race()
 test_glob_pathspec()
 test_blame_multiline()
@@ -1147,5 +1277,6 @@ test_open_deleted_colon_in_filename()
 test_linked_worktree()
 test_submodule()
 test_diff_unquote_full_control_escape_set()
+test_inline_diff_toggle()
 assert(#currantgit.errors() == 0, table.concat(currantgit.errors(), "\n"))
 print("CurrantGit safety: ok")

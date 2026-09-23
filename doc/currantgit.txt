@@ -28,6 +28,14 @@ The command surface is intentionally small in the bootstrap implementation.
 `:Git` remains the escape hatch for commands that do not yet have a dedicated
 item action.
 
+`:Git` respects window-opening command modifiers the same way fugitive's
+`:Git` does: `:vertical Git`, `:tab Git`, `:horizontal Git`, `:topleft Git`,
+and similar open the surface in a new split/tab instead of replacing the
+current window. With no modifier, the surface replaces the current window,
+same as a plain `:edit`. This only applies to the top-level `:Git` command;
+navigating within a surface (refresh, opening a diff from a status item, ...)
+never opens a split.
+
 ===============================================================================
 STATUS                                                          *currantgit-status*
 
@@ -38,7 +46,9 @@ Changes are grouped into semantic sections when present: staged changes,
 unstaged changes, untracked files, and conflicts. Sections are native folds;
 the usual |fold-commands| work without a CurrantGit-specific replacement.
 Section headings include their current item count, while the item identity and
-available actions remain attached to the item below the heading.
+available actions remain attached to the item below the heading. On a clean
+repository the "Changes" heading and its sections are omitted entirely rather
+than shown with a zero count.
 
 On a change item:
 
@@ -52,6 +62,20 @@ u                       Unstage the file.
 X                       Discard working-tree changes after confirmation.
 r                       Refresh the status surface.
 g?                      Toggle available status actions as inline buffer text.
+=                       On a staged or unstaged change item, toggle that
+                        file's diff inline beneath the row: index-vs-HEAD for
+                        a staged item, worktree-vs-index for an unstaged one.
+                        A file with both staged and unstaged changes renders
+                        as two rows, and each toggles independently using its
+                        own row's comparison. Not offered for untracked or
+                        conflict items. On a section heading, `=` instead
+                        toggles that section's native fold, same as an
+                        appropriate |fold-commands| would. The inline diff is
+                        ordinary read-only buffer content: it can be
+                        searched, yanked, and its own hunks are native folds
+                        nested inside the section's fold. Expansion state
+                        survives a refresh for changes that still exist and
+                        is dropped for changes that no longer do.
 
 The discovery line is generated from the same action metadata as the mappings.
 It is a hint, not a second keymap definition.
