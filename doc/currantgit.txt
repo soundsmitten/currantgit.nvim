@@ -102,7 +102,7 @@ CurrantGitStatusModified    Modified markers (DiffChange)
 CurrantGitStatusRenamed     Renamed/copied markers (Special)
 CurrantGitStatusUntracked   Untracked markers (Comment)
 CurrantGitPath              Repository-relative paths (Normal)
-CurrantGitHelpHeading       "Available actions" heading (Title)
+CurrantGitHelpHeading       "Available actions" heading (Comment)
 CurrantGitHelpKey           Action keys (SpecialKey)
 CurrantGitHelpDescription   Action descriptions (Comment)
 

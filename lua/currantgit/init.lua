@@ -43,7 +43,7 @@ local function define_highlights()
     CurrantGitStatusRenamed = "Special",
     CurrantGitStatusUntracked = "Comment",
     CurrantGitPath = "Normal",
-    CurrantGitHelpHeading = "Title",
+    CurrantGitHelpHeading = "Comment",
     CurrantGitHelpKey = "SpecialKey",
     CurrantGitHelpDescription = "Comment",
   }
