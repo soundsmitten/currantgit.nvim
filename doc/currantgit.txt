@@ -120,10 +120,31 @@ On a deleted item, <CR> opens the last available Git revision in a read-only
 `currantgit://deleted/...` buffer. CurrantGit does not create an empty buffer
 for a path that no longer exists.
 
-The `b` action opens a blame companion split for the selected file. The source
-buffer remains available beside the read-only attribution buffer. `gq` closes
-the blame companion and returns to the source buffer. `<CR>` on an attribution
-row opens its commit view; Ctrl-O returns to blame.
+The `b` action (or `:Git blame [path]`) opens a blame annotation window to
+the left of the source, like fugitive's `:Git blame`. It holds one row per
+source line and does not repeat the source text. The first row of each
+same-commit run shows the short commit ID, author, and author date. The rest
+of the run shows a `│` guide in that commit's colour, so each run reads as
+one block. Each commit gets its own colour (derived from its hash when
+'termguicolors' is set), shared by every run it owns.
+
+The blame and source windows are bound with 'scrollbind' and 'cursorbind',
+so scrolling or moving in either keeps the other aligned. While bound, the
+source window has 'nowrap' and 'nofoldenable', because wrapped or folded
+lines would break the 1:1 alignment. Its original options come back when
+blame closes. Running blame again for the same file, including from the
+blame window, replaces the existing annotation window.
+
+`gq` closes the blame window and returns to the source buffer. `<CR>` on a
+row opens its commit in the blame window, which is unbound and widened while
+it shows the commit. CTRL-O returns to blame and re-binds it.
+
+Blame highlight groups:
+
+CurrantGitBlameHash         Commit IDs without 'termguicolors' (Identifier)
+CurrantGitBlameAuthor       Author names (Normal)
+CurrantGitBlameDate         Author dates (Comment)
+CurrantGitBlameUncommitted  Lines not committed yet (Comment)
 
 `:GitActivity` shows the bounded command ledger: argv, duration, exit code,
 and summarized output. It is an inspection surface, not a replacement for

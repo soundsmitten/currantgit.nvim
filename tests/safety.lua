@@ -866,7 +866,12 @@ local function test_unusual_paths_end_to_end()
     assert(vim.wait(8000, function()
       return vim.api.nvim_get_current_buf() ~= before_blame_buffer and vim.bo.filetype == "git"
     end, 20), "blame did not open for " .. path)
-    assert_contains(vim.api.nvim_buf_get_lines(0, 0, -1, false), "one")
+    -- Blame rows are annotations only; the parsed rows prove Git blamed the
+    -- right file.
+    local blamed = {}
+    for _, row in ipairs(vim.b.currantgit_blame_rows) do blamed[#blamed + 1] = row.text end
+    assert_contains(blamed, "one")
+    vim.cmd("only")
 
     open_status_and_wait()
     goto_item(path)
@@ -1257,6 +1262,97 @@ local function test_inline_diff_toggle()
   vim.fn.delete(repo, "rf")
 end
 
+-- Blame is an annotation column beside the source, fugitive-style: one row
+-- per source line, no duplicated source text, scroll- and cursor-bound to the
+-- source window, with commit runs visually grouped. Closing it restores the
+-- source window's own options.
+local function test_blame_scrollbind()
+  local repo = make_repo()
+  local content = {}
+  for line = 1, 80 do content[line] = "line " .. line end
+  write_file(repo .. "/f.txt", table.concat(content, "\n") .. "\n")
+  git({ "add", "f.txt" }, repo)
+  git({ "commit", "-q", "-m", "base" }, repo)
+  local base = git({ "rev-parse", "--short=8", "HEAD" }, repo)
+  for line = 20, 24 do content[line] = "changed " .. line end
+  write_file(repo .. "/f.txt", table.concat(content, "\n") .. "\n")
+  git({ "commit", "-q", "-am", "change" }, repo)
+  local change = git({ "rev-parse", "--short=8", "HEAD" }, repo)
+
+  vim.cmd("only")
+  vim.cmd("cd " .. vim.fn.fnameescape(repo))
+  vim.cmd("edit f.txt")
+  local source_window = vim.api.nvim_get_current_win()
+  vim.wo[source_window].wrap = true
+  vim.wo[source_window].foldenable = true
+  vim.wo[source_window].scrollbind = false
+  vim.wo[source_window].cursorbind = false
+
+  currantgit.git({ "blame" })
+  assert(vim.wait(5000, function() return vim.b.currantgit_title == "blame" end, 10), "blame did not open")
+  local blame_window = vim.api.nvim_get_current_win()
+  local blame_buffer = vim.api.nvim_get_current_buf()
+  assert(blame_window ~= source_window, "blame should open in its own window")
+  assert(vim.api.nvim_win_get_position(blame_window)[2] < vim.api.nvim_win_get_position(source_window)[2],
+    "blame should sit to the left of the source, like fugitive")
+  local lines = vim.api.nvim_buf_get_lines(blame_buffer, 0, -1, false)
+  assert(#lines == 80, "blame should have exactly one row per source line, got " .. #lines)
+  for _, line in ipairs(lines) do
+    assert(not line:find("line %d") and not line:find("changed %d"), "blame should not duplicate source text: " .. line)
+  end
+  assert(lines[1]:find(base, 1, true), "first row of a run should name its commit")
+  assert(not lines[2]:find(base, 1, true), "continuation rows should not repeat the commit")
+  assert(lines[20]:find(change, 1, true), "a new run should name its own commit")
+  assert(lines[25]:find(base, 1, true), "the run after a change should name its commit again")
+  assert(lines[1]:find("%d%d%d%d%-%d%d%-%d%d"), "first row should show the author date")
+
+  -- Every row carries a commit-run highlight so runs read as blocks.
+  local namespace = vim.api.nvim_create_namespace("currantgit_blame")
+  local marked = {}
+  for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(blame_buffer, namespace, 0, -1, { details = true })) do
+    marked[mark[2] + 1] = true
+  end
+  for row = 1, 80 do assert(marked[row], "blame row " .. row .. " has no commit highlight") end
+
+  for _, window in ipairs({ blame_window, source_window }) do
+    assert(vim.wo[window].scrollbind and vim.wo[window].cursorbind, "blame and source must be scroll/cursor bound")
+  end
+  assert(not vim.wo[source_window].wrap and not vim.wo[source_window].foldenable,
+    "source must not wrap or fold while bound, or rows drift out of alignment")
+  assert(not vim.wo[blame_window].number and vim.wo[blame_window].winfixwidth)
+
+  vim.api.nvim_set_current_win(source_window)
+  -- Plain jumps only: feedkeys("x") runs outside the top-level command
+  -- loop, where Vim skips some scrollbind propagation (e.g. after `zt`)
+  -- that real typing gets. A jump is synced on both paths.
+  vim.api.nvim_feedkeys("50G", "x", false)
+  assert(vim.fn.line("w0", blame_window) == vim.fn.line("w0", source_window),
+    "blame topline should follow the source")
+  assert(vim.api.nvim_win_get_cursor(blame_window)[1] == 50, "blame cursor should follow the source")
+  vim.api.nvim_set_current_win(blame_window)
+  vim.api.nvim_feedkeys("10G", "x", false)
+  assert(vim.api.nvim_win_get_cursor(source_window)[1] == 10, "source cursor should follow blame")
+
+  vim.fn.maparg("gq", "n", false, true).callback()
+  assert(not vim.api.nvim_win_is_valid(blame_window), "gq should close blame")
+  assert(vim.wo[source_window].wrap and vim.wo[source_window].foldenable, "closing blame should restore source options")
+  assert(not vim.wo[source_window].scrollbind and not vim.wo[source_window].cursorbind,
+    "closing blame should unbind the source")
+
+  -- Blaming the same file again reuses the name instead of failing on E95.
+  currantgit.git({ "blame" })
+  assert(vim.wait(5000, function() return vim.b.currantgit_title == "blame" end, 10), "second blame did not open")
+  currantgit.git({ "blame", "f.txt" })
+  vim.wait(200)
+  assert(#vim.api.nvim_list_wins() == 2, "re-blaming should replace the old blame window, not stack another")
+  vim.fn.maparg("gq", "n", false, true).callback()
+
+  vim.cmd("only")
+  vim.cmd("enew")
+  vim.cmd("cd " .. vim.fn.fnameescape(original_cwd))
+  vim.fn.delete(repo, "rf")
+end
+
 test_cwd_race()
 test_glob_pathspec()
 test_blame_multiline()
@@ -1278,5 +1374,6 @@ test_linked_worktree()
 test_submodule()
 test_diff_unquote_full_control_escape_set()
 test_inline_diff_toggle()
+test_blame_scrollbind()
 assert(#currantgit.errors() == 0, table.concat(currantgit.errors(), "\n"))
 print("CurrantGit safety: ok")
