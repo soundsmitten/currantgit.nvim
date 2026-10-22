@@ -27,6 +27,11 @@ and deleted files get an empty labelled side. No Git mutation was added.
   mapping is dropped on `BufWinLeave` so the real worktree file doesn't
   keep it.
 
+- `gq` is now universal: every `set_buffer` surface and the deleted-file
+  view get it (`quit_surface` in `init.lua`), alongside blame's existing
+  one. Per user direction, this widened the init.lua touch beyond hooks.
+  `tests/quit.lua` presses it on each surface and in a `:vertical` split.
+
 ## Evidence
 
 - `tests/diffsplit.lua` (wired into `tests/smoke.lua`), written first and

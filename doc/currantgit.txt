@@ -51,6 +51,13 @@ available actions remain attached to the item below the heading. On a clean
 repository the "Changes" heading and its sections are omitted entirely rather
 than shown with a zero count.
 
+                                                        *currantgit-quit*
+`gq` quits any CurrantGit surface (status, diff, log, commit, activity, the
+deleted-file view, blame, the diff split, the conflict resolver). A surface
+opened in its own split or tab closes it; otherwise the window returns to
+the buffer the first CurrantGit surface replaced in it (an empty buffer if
+there was none).
+
 On a change item:
 
 <CR>                    Open the file. Deleted files open their last

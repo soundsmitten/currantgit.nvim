@@ -135,7 +135,6 @@ local function test_diff_split()
   press("gq")
   assert(vim.t.currantgit_diff_split == nil and vim.api.nvim_get_current_buf() == status_buffer,
     "gq should close the diff split tab")
-  assert(vim.fn.maparg("gq", "n", false, true).buffer ~= 1)
   vim.api.nvim_buf_call(worktree_buffer, function()
     assert(vim.fn.maparg("gq", "n", false, true).buffer ~= 1, "gq must not stay on the real file")
   end)
