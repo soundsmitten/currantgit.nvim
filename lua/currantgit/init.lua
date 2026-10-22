@@ -3,6 +3,7 @@ local config = require("currantgit.config")
 local actions = require("currantgit.actions")
 local blame = require("currantgit.blame")
 local diff = require("currantgit.diff")
+local diff_syntax = require("currantgit.diff_syntax")
 local git_log = require("currantgit.log")
 local navigation = require("currantgit.navigation")
 local rpc = require("currantgit.rpc")
@@ -47,6 +48,12 @@ local function define_highlights()
     CurrantGitHelpHeading = "Comment",
     CurrantGitHelpKey = "SpecialKey",
     CurrantGitHelpDescription = "Comment",
+    CurrantGitDiffAdd = "DiffAdd",
+    CurrantGitDiffDelete = "DiffDelete",
+    CurrantGitDiffAddSign = "Added",
+    CurrantGitDiffDeleteSign = "Removed",
+    CurrantGitDiffHunk = "Statement",
+    CurrantGitDiffHeader = "Comment",
     CurrantGitBlameHash = "Identifier",
     CurrantGitBlameAuthor = "Normal",
     CurrantGitBlameDate = "Comment",
@@ -618,7 +625,10 @@ open_commit = function(commit, root)
         return
       end
       navigation.update(0)
-      set_buffer(vim.split(vim.trim(result.stdout or ""), "\n", { plain = true }), {}, "commit/" .. commit:sub(1, 8), {}, root)
+      local lines = vim.split(vim.trim(result.stdout or ""), "\n", { plain = true })
+      local buffer = set_buffer(lines, {}, "commit/" .. commit:sub(1, 8), {}, root)
+      diff_syntax.clear(buffer)
+      diff_syntax.apply(buffer, 0, lines)
       navigation.visit(0)
     end)
   end)
@@ -763,6 +773,10 @@ set_buffer = function(lines, items, title, line_items, root, fold_levels, highli
     vim.b[buffer].currantgit_status_highlights = highlights or {}
     apply_status_highlights(buffer, highlights)
     vim.b[buffer].currantgit_item_sections = (status_extra and status_extra.item_sections) or {}
+    diff_syntax.clear(buffer)
+    for _, region in ipairs((status_extra and status_extra.diff_regions) or {}) do
+      diff_syntax.apply(buffer, region.start_row, region.lines, { path = region.path })
+    end
     if status_extra and status_extra.parsed then
       vim.b[buffer].currantgit_status_parsed = status_extra.parsed
     end
@@ -902,7 +916,12 @@ open_diff_args = function(args, root, mods)
       end
       local lines, fold_levels, line_items, hunks = diff.parse(result.stdout or "", { mode = mode, path = path })
       navigation.update(0)
-      set_buffer(lines, hunks, "diff", line_items, root, fold_levels, nil, mods)
+      local buffer = set_buffer(lines, hunks, "diff", line_items, root, fold_levels, nil, mods)
+      -- Our extmarks replace the regex `diff` syntax; keeping both would
+      -- paint whole added/removed lines one colour over the tokens.
+      vim.bo[buffer].syntax = "OFF"
+      diff_syntax.clear(buffer)
+      diff_syntax.apply(buffer, 0, lines, { path = path })
       vim.b.currantgit_diff_hunks = hunks
       vim.b.currantgit_diff_args = args
       navigation.visit(0)
@@ -1076,6 +1095,7 @@ local function render_status_body(header, branch, sections, items, expanded)
   local section_nodes = {}
   local highlights = {}
   local item_sections = {}
+  local diff_regions = {}
   local function highlight(line, start_col, end_col, group)
     highlights[#highlights + 1] = {
       line = line,
@@ -1147,6 +1167,7 @@ local function render_status_body(header, branch, sections, items, expanded)
             -- instead of merging into the flat run of sibling item rows.
             fold_levels[#lines] = ">2"
             local offset = #lines
+            diff_regions[#diff_regions + 1] = { start_row = offset, lines = expansion.lines, path = item.path }
             for diff_line, text in ipairs(expansion.lines) do
               lines[offset + diff_line] = text
               fold_levels[offset + diff_line] = offset_fold_level(expansion.fold_levels[diff_line], 2)
@@ -1167,7 +1188,7 @@ local function render_status_body(header, branch, sections, items, expanded)
   end
   lines[#lines + 1] = ""
   fold_levels[#lines] = 0
-  return lines, line_items, fold_levels, section_nodes, highlights, item_sections
+  return lines, line_items, fold_levels, section_nodes, highlights, item_sections, diff_regions
 end
 
 -- Which section (staged/unstaged/untracked/conflicts) the row under the
@@ -1205,10 +1226,11 @@ local function rerender_status(buffer)
   local expanded = vim.b[buffer].currantgit_expanded or {}
   local window = vim.fn.bufwinid(buffer)
   local cursor = window ~= -1 and vim.api.nvim_win_get_cursor(window)
-  local lines, line_items, fold_levels, section_nodes, highlights, item_sections =
+  local lines, line_items, fold_levels, section_nodes, highlights, item_sections, diff_regions =
     render_status_body(parsed.header, parsed.branch, parsed.sections, parsed.items, expanded)
   set_buffer(lines, parsed.items, "status", line_items, parsed.root, fold_levels, highlights, nil, {
     item_sections = item_sections,
+    diff_regions = diff_regions,
     expanded = expanded,
     parsed = parsed,
   })
@@ -1328,10 +1350,11 @@ open_status = function(root, mods)
         and vim.b[previous_buffer].currantgit_expanded or nil
       refresh_expanded_diffs(root, sections, previous_expanded, function(expanded)
         if request ~= state.status_request then return end
-        local lines, line_items, fold_levels, section_nodes, highlights, item_sections =
+        local lines, line_items, fold_levels, section_nodes, highlights, item_sections, diff_regions =
           render_status_body(header, branch, sections, items, expanded)
         local buffer = set_buffer(lines, items, "status", line_items, root, fold_levels, highlights, mods, {
           item_sections = item_sections,
+          diff_regions = diff_regions,
           expanded = expanded,
           parsed = { header = header, branch = branch, sections = sections, items = items, root = root },
         })

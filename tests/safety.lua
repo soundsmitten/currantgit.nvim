@@ -1353,6 +1353,90 @@ local function test_blame_scrollbind()
   vim.fn.delete(repo, "rf")
 end
 
+-- Diff content is highlighted as the file's own language (treesitter),
+-- offset past the +/-/space prefix, with add/delete line backgrounds -- on
+-- the diff surface, inline status diffs, and the commit view alike.
+local function test_diff_syntax_highlighting()
+  local repo = make_repo()
+  write_file(repo .. "/a.lua", "local x = 1\nreturn x\n")
+  write_file(repo .. "/notes.txt", "plain\n")
+  git({ "add", "." }, repo)
+  git({ "commit", "-q", "-m", "base" }, repo)
+  write_file(repo .. "/a.lua", "local x = 2\nlocal name = \"hi\"\nreturn x\n")
+  write_file(repo .. "/notes.txt", "plain\nmore\n")
+  vim.cmd("only")
+  vim.cmd("cd " .. vim.fn.fnameescape(repo))
+  local namespace = vim.api.nvim_create_namespace("currantgit_diff_syntax")
+
+  local function marks_on(buffer, needle)
+    local lines = vim.api.nvim_buf_get_lines(buffer, 0, -1, false)
+    for row, line in ipairs(lines) do
+      if line == needle then
+        local found = {}
+        for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(buffer, namespace, { row - 1, 0 }, { row - 1, -1 },
+          { details = true })) do
+          found[#found + 1] = { col = mark[3], end_col = mark[4].end_col, group = mark[4].hl_group,
+            line_group = mark[4].line_hl_group }
+        end
+        return found
+      end
+    end
+    error("no line " .. needle .. " in buffer")
+  end
+  local function has(found, predicate)
+    for _, mark in ipairs(found) do if predicate(mark) then return true end end
+    return false
+  end
+  local function assert_lua_highlighted(buffer, where)
+    local added = marks_on(buffer, '+local name = "hi"')
+    assert(has(added, function(m) return m.line_group == "CurrantGitDiffAdd" end), where .. ": + line needs add background")
+    assert(has(added, function(m) return m.group == "@keyword.lua" and m.col == 1 and m.end_col == 6 end),
+      where .. ": `local` should be a lua keyword, offset past the + prefix")
+    assert(has(added, function(m) return m.group == "@string.lua" and m.col == 14 end),
+      where .. ": the string literal should be highlighted as a lua string")
+    local removed = marks_on(buffer, "-local x = 1")
+    assert(has(removed, function(m) return m.line_group == "CurrantGitDiffDelete" end), where .. ": - line needs delete background")
+    assert(has(removed, function(m) return m.group == "@number.lua" end), where .. ": removed lines are highlighted too")
+    local context = marks_on(buffer, " return x")
+    assert(has(context, function(m) return m.group == "@keyword.return.lua" or m.group == "@keyword.lua" end),
+      where .. ": context lines are highlighted")
+    assert(not has(context, function(m) return m.line_group end), where .. ": context lines get no add/delete background")
+  end
+
+  currantgit.git({ "diff" })
+  assert(vim.wait(5000, function() return vim.bo.filetype == "diff" end, 10), "diff did not open")
+  local diff_buffer = vim.api.nvim_get_current_buf()
+  assert_lua_highlighted(diff_buffer, "diff surface")
+  -- No parser for .txt: still add/delete backgrounds, no errors.
+  local plain = marks_on(diff_buffer, "+more")
+  assert(has(plain, function(m) return m.line_group == "CurrantGitDiffAdd" end), "unparsed files still get line backgrounds")
+
+  open_status_and_wait()
+  goto_item("a.lua")
+  local status_buffer = vim.api.nvim_get_current_buf()
+  local before = vim.api.nvim_buf_get_changedtick(status_buffer)
+  vim.fn.maparg("=", "n", false, true).callback()
+  assert(vim.wait(5000, function()
+    return vim.api.nvim_buf_get_changedtick(status_buffer) > before
+      and vim.tbl_contains(vim.api.nvim_buf_get_lines(status_buffer, 0, -1, false), '+local name = "hi"')
+  end, 10), "inline diff did not expand")
+  assert_lua_highlighted(status_buffer, "inline status diff")
+
+  git({ "commit", "-q", "-am", "change" }, repo)
+  currantgit.git({ "log" })
+  assert(vim.wait(5000, function() return vim.b.currantgit_title == "log" end, 10), "log did not open")
+  vim.api.nvim_win_set_cursor(0, { 2, 0 })
+  vim.fn.maparg("<CR>", "n", false, true).callback()
+  assert(vim.wait(5000, function()
+    return vim.b.currantgit_title and vim.b.currantgit_title:find("commit/", 1, true) == 1
+  end, 10), "commit view did not open")
+  assert_lua_highlighted(vim.api.nvim_get_current_buf(), "commit view")
+
+  vim.cmd("enew")
+  vim.cmd("cd " .. vim.fn.fnameescape(original_cwd))
+  vim.fn.delete(repo, "rf")
+end
+
 test_cwd_race()
 test_glob_pathspec()
 test_blame_multiline()
@@ -1375,5 +1459,6 @@ test_submodule()
 test_diff_unquote_full_control_escape_set()
 test_inline_diff_toggle()
 test_blame_scrollbind()
+test_diff_syntax_highlighting()
 assert(#currantgit.errors() == 0, table.concat(currantgit.errors(), "\n"))
 print("CurrantGit safety: ok")
