@@ -285,6 +285,33 @@ local function test_resolver_interactions()
   local file_item = vim.b[panes.result].currantgit_conflict
   assert(file_item.id == "conflict-file:" .. odd and file_item.total == 2)
 
+  -- Presentation: each side has its own colors, filler is hatched, marker
+  -- lines keep their real text plus an end-of-line label, and the result
+  -- winbar tracks resolution live.
+  assert(vim.wo[windows[1]].winhighlight:find("DiffAdd:CurrantGitConflictOurs", 1, true))
+  assert(vim.wo[windows[3]].winhighlight:find("DiffAdd:CurrantGitConflictTheirs", 1, true))
+  for _, window in ipairs(windows) do assert(vim.wo[window].fillchars:find("diff:╱", 1, true)) end
+  assert(vim.wo[windows[1]].winbar:find("ours", 1, true) and vim.wo[windows[1]].winbar:find("main", 1, true))
+  assert(vim.wo[windows[3]].winbar:find("theirs", 1, true) and vim.wo[windows[3]].winbar:find("other", 1, true))
+  assert(vim.wo[windows[2]].winbar:find("0 of 2 resolved", 1, true), vim.wo[windows[2]].winbar)
+  local namespace = vim.api.nvim_create_namespace("currantgit_conflict")
+  local groups, labels = {}, {}
+  for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(panes.result, namespace, 0, -1, { details = true })) do
+    if mark[4].line_hl_group then groups[mark[4].line_hl_group] = true end
+    for _, chunk in ipairs(mark[4].virt_text or {}) do labels[#labels + 1] = chunk[1] end
+  end
+  assert(groups.CurrantGitConflictOurs and groups.CurrantGitConflictTheirs and groups.CurrantGitConflictBase)
+  assert(groups.CurrantGitConflictMarker)
+  assert(table.concat(labels, " "):find("ours", 1, true) and table.concat(labels, " "):find("theirs", 1, true))
+  local first_region = conflict.parse_markers(vim.api.nvim_buf_get_lines(panes.result, 0, -1, false))[1]
+  local saved = vim.api.nvim_buf_get_lines(panes.result, 0, -1, false)
+  vim.api.nvim_buf_set_lines(panes.result, first_region.start - 1, first_region.finish, false, { "picked" })
+  vim.api.nvim_exec_autocmds("TextChanged", { buffer = panes.result })
+  assert(vim.wo[windows[2]].winbar:find("1 of 2 resolved", 1, true), vim.wo[windows[2]].winbar)
+  vim.api.nvim_buf_set_lines(panes.result, 0, -1, false, saved)
+  vim.api.nvim_exec_autocmds("TextChanged", { buffer = panes.result })
+  vim.bo[panes.result].modified = false
+
   -- ]x / [x jump between region items in the result pane.
   vim.api.nvim_win_set_cursor(0, { 1, 0 })
   press("]x")

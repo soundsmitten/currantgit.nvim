@@ -172,6 +172,22 @@ gb                      Show or hide the merge base (stage 1) under the
                         result pane. It is read-only and stays out of diff
                         mode.
 
+Presentation: each side has its own colors in its pane and inside the
+result's conflict blocks, filler lines are hatched (`diff:╱` in
+'fillchars'), marker lines keep their real text with an end-of-line label,
+and the result winbar shows "n of m resolved" as you edit. Word-level
+highlights come from your 'diffopt' (`inline:word` or `inline:char`);
+CurrantGit does not change that global option. Override these groups to
+restyle it (defaults link to diff groups, so the colorscheme applies):
+
+CurrantGitConflictOurs        Ours lines (DiffAdd)
+CurrantGitConflictOursText    Changed text on ours lines (DiffText)
+CurrantGitConflictTheirs      Theirs lines (DiffChange)
+CurrantGitConflictTheirsText  Changed text on theirs lines (DiffText)
+CurrantGitConflictBase        Base lines in diff3/zdiff3 blocks (Comment)
+CurrantGitConflictMarker      Marker lines (NonText)
+CurrantGitConflictLabel       Marker labels (Special)
+
 Markers are assumed to be the default 7 characters; a custom
 `conflict-marker-size` attribute is not read yet.
 

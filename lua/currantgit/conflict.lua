@@ -12,6 +12,25 @@
 local M = {}
 
 local deps = {}
+local namespace = vim.api.nvim_create_namespace("currantgit_conflict")
+
+-- Every color links to a diff group by default, so the resolver follows the
+-- colorscheme; users override these names before setup to restyle it.
+local HIGHLIGHTS = {
+  CurrantGitConflictOurs = "DiffAdd",
+  CurrantGitConflictOursText = "DiffText",
+  CurrantGitConflictTheirs = "DiffChange",
+  CurrantGitConflictTheirsText = "DiffText",
+  CurrantGitConflictBase = "Comment",
+  CurrantGitConflictMarker = "NonText",
+  CurrantGitConflictLabel = "Special",
+}
+
+local SIDE_HIGHLIGHT = {
+  ours = "DiffAdd:CurrantGitConflictOurs,DiffChange:CurrantGitConflictOurs,DiffText:CurrantGitConflictOursText",
+  theirs = "DiffAdd:CurrantGitConflictTheirs,DiffChange:CurrantGitConflictTheirs,"
+    .. "DiffText:CurrantGitConflictTheirsText",
+}
 
 -- `git help merge-file`: markers are 7 characters by default. A marker is
 -- the marker run alone or followed by a space and a label; a longer run
@@ -41,9 +60,9 @@ function M.parse_markers(lines)
       local is_base, base_label = marker(line, "|")
       local is_close, close_label = marker(line, ">")
       if is_base and part == "ours" then
-        current.base, current.base_label, part = {}, base_label, "base"
+        current.base, current.base_label, current.base_marker, part = {}, base_label, index, "base"
       elseif line == string.rep("=", MARKER_SIZE) and (part == "ours" or part == "base") then
-        part = "theirs"
+        current.separator, part = index, "theirs"
       elseif is_close and part == "theirs" then
         current.finish, current.theirs_label = index, close_label
         regions[#regions + 1] = current
@@ -274,11 +293,98 @@ local function show_stage(root, item, stage, done)
   end)
 end
 
-local function label(side, item)
-  if side == "ours" then
-    return item.missing == "ours" and "ours (deleted)" or "ours"
+local function label(side, item, names)
+  if item.missing == side then return side .. " (deleted)" end
+  local name = names[side]
+  return name and (side .. " · " .. name) or side
+end
+
+-- Branch/commit names for the winbars: ours is HEAD; theirs is whichever
+-- operation head exists. Failures only cost the decoration.
+local function side_names(root, done)
+  local names = {}
+  local function short(revision, callback)
+    deps.run(root, { "rev-parse", "--short", "-q", "--verify", revision }, function(result)
+      callback(result.code == 0 and vim.trim(result.stdout or "") or nil)
+    end)
   end
-  return item.missing == "theirs" and "theirs (deleted)" or "theirs"
+  deps.run(root, { "symbolic-ref", "--short", "-q", "HEAD" }, function(branch)
+    short("HEAD", function(head)
+      local ours = vim.trim(branch.code == 0 and branch.stdout or "")
+      names.ours = vim.trim(((ours ~= "" and ours) or "HEAD") .. " " .. (head or ""))
+      local heads = { "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "REBASE_HEAD" }
+      local function try(index)
+        if index > #heads then
+          done(names)
+          return
+        end
+        short(heads[index], function(theirs)
+          if theirs then
+            names.theirs_sha = theirs
+            done(names)
+          else
+            try(index + 1)
+          end
+        end)
+      end
+      try(1)
+    end)
+  end)
+end
+
+local function fill_with_hatching(window)
+  local entries = {}
+  for entry in (vim.wo[window].fillchars or ""):gmatch("[^,]+") do
+    if not vim.startswith(entry, "diff:") then entries[#entries + 1] = entry end
+  end
+  entries[#entries + 1] = "diff:╱"
+  vim.wo[window].fillchars = table.concat(entries, ",")
+end
+
+-- Colors each live region by side and labels its marker lines at end of
+-- line. The marker text itself stays visible: it is real buffer content the
+-- user is about to edit. Also refreshes the "n of m resolved" winbar.
+local function decorate(buffer)
+  if not vim.api.nvim_buf_is_valid(buffer) then return end
+  vim.api.nvim_buf_clear_namespace(buffer, namespace, 0, -1)
+  local item = vim.b[buffer].currantgit_conflict
+  local live = M.parse_markers(vim.api.nvim_buf_get_lines(buffer, 0, -1, false))
+  local function line(row, group, text)
+    vim.api.nvim_buf_set_extmark(buffer, namespace, row - 1, 0, {
+      line_hl_group = group,
+      virt_text = text and { { text, "CurrantGitConflictLabel" } } or nil,
+      virt_text_pos = text and "eol" or nil,
+      priority = 4200,
+    })
+  end
+  local function span(first, last, group)
+    for row = first, last do line(row, group) end
+  end
+  for _, region in ipairs(live) do
+    local ours_end = (region.base_marker or region.separator) - 1
+    line(region.start, "CurrantGitConflictMarker", "  ours" .. (region.ours_label and " · " .. region.ours_label or ""))
+    span(region.start + 1, ours_end, "CurrantGitConflictOurs")
+    if region.base_marker then
+      line(region.base_marker, "CurrantGitConflictMarker", "  base")
+      span(region.base_marker + 1, region.separator - 1, "CurrantGitConflictBase")
+    end
+    line(region.separator, "CurrantGitConflictMarker")
+    span(region.separator + 1, region.finish - 1, "CurrantGitConflictTheirs")
+    line(region.finish, "CurrantGitConflictMarker",
+      "  theirs" .. (region.theirs_label and " · " .. region.theirs_label or ""))
+  end
+  local window = vim.fn.bufwinid(buffer)
+  if window ~= -1 and item then
+    local unresolved = 0
+    for _, region in ipairs(M.match(item.path, item.regions or {}, live)) do
+      if region.state == "unresolved" then unresolved = unresolved + 1 end
+    end
+    local total = math.max(#(item.regions or {}), unresolved)
+    local path = item.path:gsub("%%", "%%%%")
+    vim.wo[window].winbar = total > 0
+      and string.format("%s — %d of %d resolved", path, total - unresolved, total)
+      or path
+  end
 end
 
 local function attach_pane(buffer, run_action)
@@ -302,6 +408,7 @@ function M.open(status_item, root)
       vim.notify("CurrantGit: " .. item.path .. " is not in the worktree", vim.log.levels.WARN)
       return
     end
+    side_names(root, function(names)
     show_stage(root, item, 2, function(ours, ours_missing)
       show_stage(root, item, 3, function(theirs, theirs_missing)
         vim.cmd("tabnew " .. vim.fn.fnameescape(root .. "/" .. item.path))
@@ -314,16 +421,35 @@ function M.open(status_item, root)
         local theirs_buffer = side_buffer("theirs", item.path, theirs, theirs_missing)
         vim.cmd("leftabove vsplit")
         vim.api.nvim_set_current_buf(ours_buffer)
-        vim.wo.winbar = label("ours", item)
+        vim.wo.winbar = label("ours", item, names)
+        vim.wo.winhighlight = SIDE_HIGHLIGHT.ours
         vim.api.nvim_set_current_win(result_window)
         vim.cmd("rightbelow vsplit")
         vim.api.nvim_set_current_buf(theirs_buffer)
-        vim.wo.winbar = label("theirs", item)
+        local first = M.parse_markers(vim.api.nvim_buf_get_lines(result, 0, -1, false))[1]
+        names.theirs = vim.trim(((first and first.theirs_label) or "") .. " " .. (names.theirs_sha or ""))
+        if names.theirs == "" then names.theirs = nil end
+        vim.wo.winbar = label("theirs", item, names)
+        vim.wo.winhighlight = SIDE_HIGHLIGHT.theirs
         vim.api.nvim_set_current_win(result_window)
-        vim.wo.winbar = "result"
         for _, window in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
           vim.api.nvim_win_call(window, function() vim.cmd("diffthis") end)
+          fill_with_hatching(window)
         end
+        decorate(result)
+        local group = vim.api.nvim_create_augroup("CurrantGitConflict" .. result, { clear = true })
+        vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI" }, {
+          group = group, buffer = result, callback = function() decorate(result) end,
+        })
+        -- The result is the user's real file: drop the decorations once it
+        -- leaves the resolver, so it doesn't stay painted elsewhere.
+        vim.api.nvim_create_autocmd("BufWinLeave", {
+          group = group, buffer = result,
+          callback = function()
+            vim.api.nvim_buf_clear_namespace(result, namespace, 0, -1)
+            vim.api.nvim_del_augroup_by_id(group)
+          end,
+        })
         vim.t.currantgit_conflict = {
           ours = ours_buffer, result = result, theirs = theirs_buffer, root = root, path = item.path,
         }
@@ -332,6 +458,7 @@ function M.open(status_item, root)
           attach_pane(buffer, deps.dispatch)
         end
       end)
+    end)
     end)
   end)
 end
@@ -428,6 +555,9 @@ end
 -- `options.dispatch(buffer, id)` routes pane mappings back through actions.
 function M.setup(options)
   deps = options
+  for name, link in pairs(HIGHLIGHTS) do
+    vim.api.nvim_set_hl(0, name, { link = link, default = true })
+  end
 end
 
 function M.register(actions, open)

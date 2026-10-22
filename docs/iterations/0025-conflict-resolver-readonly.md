@@ -10,6 +10,10 @@ buffers on the sides. `gb` toggles a read-only base view; `]x`/`[x` jump
 between conflict rows in status and between regions in the result pane.
 No Git mutation was added.
 
+Presentation pass: per-side colors (linked to diff groups), hatched
+filler, labelled-but-visible marker lines, and a live "n of m resolved"
+result winbar. Decorations clear when the file leaves the resolver.
+
 ## Item/action seam
 
 - New module `lua/currantgit/conflict.lua` owns parsing, matching, the
@@ -34,7 +38,8 @@ No Git mutation was added.
   Every block asserts `git ls-files -s`/`-u`, status, HEAD and MERGE_HEAD
   are unchanged.
 - Not exercised: rebase and cherry-pick conflicts (same index stages, not
-  separately fixtured), custom `conflict-marker-size`, and visual feel.
+  separately fixtured), custom `conflict-marker-size`, and visual feel (whether extmark line
+  colors win over diff colors is asserted structurally, not on screen).
 
 ## Drift check
 
