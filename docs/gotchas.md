@@ -244,3 +244,13 @@ these, see [`decisions/`](decisions/).
   serialize/deserialize boundary as any other `vim.b`/`vim.g`/`vim.w`
   access. To persist a change, build the new table value and assign it
   back with a direct `vim.b[buffer].x = new_table`.
+
+- **A literal embedded NUL byte (`\0`) written directly into a Lua pattern
+  string silently truncates the pattern**, even though the *subject* string
+  being matched handles embedded NULs fine (e.g. `entry:sub(4)` on `-z`
+  porcelain output). `("a\0b"):match("^(.-)\0(.*)$")` returns `("", nil)`
+  instead of `("a", "b")` — confirmed empirically. Use the `%z` pattern
+  class instead: `("a\0b"):match("^(.-)%z(.*)$")` correctly returns
+  `("a", "b")`. This only affects the *pattern* argument; `\0` inside the
+  string being searched, or inside a plain (non-pattern) `string.find`
+  call, is unaffected.

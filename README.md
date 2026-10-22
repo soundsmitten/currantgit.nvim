@@ -88,7 +88,6 @@ require("currantgit").setup({
   git = { command = "git" },
   ui = {
     title = "My Git",
-    show_clean = true,
     show_branch = true,
     show_counts = true,
     icons = {

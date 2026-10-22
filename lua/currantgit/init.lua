@@ -13,6 +13,7 @@ local state = {
   errors = {},
   command_log = {},
   log_request = 0,
+  status_request = 0,
 }
 
 local open_status
@@ -534,6 +535,19 @@ local function dispatch_current(buffer, id)
   end
 end
 
+-- Some physical keys resolve to a different action depending on the kind of
+-- item under the cursor (e.g. `=` toggles a section's native fold on a
+-- heading, but toggles a change item's inline diff on a file row). Resolve
+-- through the same which_key() projection the discovery bar and WhichKey
+-- integration already use, instead of hardcoding one action id per key.
+local function dispatch_current_key(buffer, key)
+  local item = current_item(buffer)
+  local binding = actions.which_key(item, action_context(buffer))[key]
+  if binding then
+    binding.action()
+  end
+end
+
 local function attach_status(buffer)
   navigation.visit(0)
   local map = function(mode, lhs, rhs)
@@ -548,6 +562,7 @@ local function attach_status(buffer)
   map("n", "X", function() dispatch_current(buffer, "item.discard") end)
   map("n", "r", function() dispatch_current(buffer, "surface.refresh") end)
   map("n", "g?", function() dispatch_current(buffer, "surface.help") end)
+  map("n", "=", function() dispatch_current_key(buffer, "=") end)
   local group = vim.api.nvim_create_augroup("CurrantGitStatus" .. buffer, { clear = true })
   vim.api.nvim_create_autocmd("CursorMoved", {
     group = group,
@@ -595,12 +610,39 @@ attach_log = function(buffer)
   update_discovery(buffer)
 end
 
-set_buffer = function(lines, items, title, line_items, root, fold_levels, highlights)
+set_buffer = function(lines, items, title, line_items, root, fold_levels, highlights, mods, status_extra)
   local name = "currantgit://" .. title
   local buffer = vim.fn.bufnr(name)
-  if buffer < 0 or not vim.api.nvim_buf_is_valid(buffer) then
+  local reused_buffer = buffer >= 0 and vim.api.nvim_buf_is_valid(buffer)
+  if not reused_buffer then
     buffer = vim.api.nvim_create_buf(false, true)
     vim.api.nvim_buf_set_name(buffer, name)
+  end
+  mods = mods or ""
+  -- Mirrors fugitive's :Git: if this surface is already open in some
+  -- window, focus that window instead of opening a duplicate view --
+  -- checked before applying a split modifier, same priority fugitive
+  -- gives window reuse over `:vertical`/`:horizontal`/etc (`:tab` still
+  -- widens the search to every tab instead of skipping reuse).
+  local existing_window
+  if reused_buffer then
+    if mods:find("tab", 1, true) then
+      existing_window = vim.fn.win_findbuf(buffer)[1]
+    else
+      local window = vim.fn.bufwinid(buffer)
+      existing_window = window ~= -1 and window or nil
+    end
+  end
+  if existing_window then
+    vim.api.nvim_set_current_tabpage(vim.api.nvim_win_get_tabpage(existing_window))
+    vim.api.nvim_set_current_win(existing_window)
+  elseif mods ~= "" then
+    -- Mirrors fugitive: `:vertical Git`/`:tab Git` open the surface in a
+    -- split/tab the same way `:vertical edit`/`:tab edit` would. Only the
+    -- top-level :Git command threads a `mods` argument down to here --
+    -- internal navigation (refresh, stage, opening a diff from status, ...)
+    -- always passes nothing, so it never triggers a split.
+    vim.cmd(mods .. " split")
   end
   vim.api.nvim_set_current_buf(buffer)
   vim.bo[buffer].buftype = "nofile"
@@ -628,6 +670,11 @@ set_buffer = function(lines, items, title, line_items, root, fold_levels, highli
     vim.b[buffer].currantgit_help_open = vim.b[buffer].currantgit_help_open or false
     vim.b[buffer].currantgit_status_highlights = highlights or {}
     apply_status_highlights(buffer, highlights)
+    vim.b[buffer].currantgit_item_sections = (status_extra and status_extra.item_sections) or {}
+    if status_extra and status_extra.parsed then
+      vim.b[buffer].currantgit_status_parsed = status_extra.parsed
+    end
+    vim.b[buffer].currantgit_expanded = (status_extra and status_extra.expanded) or {}
   end
   vim.wo.foldmethod = (title == "status" or title == "diff") and "expr" or "manual"
   if title == "status" or title == "diff" then
@@ -645,7 +692,7 @@ set_buffer = function(lines, items, title, line_items, root, fold_levels, highli
   return buffer
 end
 
-open_log = function(args, root)
+open_log = function(args, root, mods)
   local error_message
   if not root then root, error_message = repository_root() end
   if not root then
@@ -681,7 +728,7 @@ open_log = function(args, root)
       end
       local lines, line_items = git_log.render(items)
       navigation.update(0)
-      local buffer = set_buffer(lines, items, "log", line_items, root)
+      local buffer = set_buffer(lines, items, "log", line_items, root, nil, nil, mods)
       vim.b.currantgit_log_args = log_args
       if view then
         if selected then
@@ -729,7 +776,7 @@ local function classify_diff_mode(args)
   return "historical"
 end
 
-open_diff_args = function(args, root)
+open_diff_args = function(args, root, mods)
   local error_message
   if not root then
     root, error_message = repository_root()
@@ -763,7 +810,7 @@ open_diff_args = function(args, root)
       end
       local lines, fold_levels, line_items, hunks = diff.parse(result.stdout or "", { mode = mode, path = path })
       navigation.update(0)
-      set_buffer(lines, hunks, "diff", line_items, root, fold_levels)
+      set_buffer(lines, hunks, "diff", line_items, root, fold_levels, nil, mods)
       vim.b.currantgit_diff_hunks = hunks
       vim.b.currantgit_diff_args = args
       navigation.visit(0)
@@ -786,25 +833,17 @@ local UNMERGED_STATUS_CODES = {
   DD = true, AU = true, UD = true, UA = true, DU = true, AA = true, UU = true,
 }
 
-local function parse_status(stdout)
+-- Parses raw `git status` output into semantic data only (header, branch,
+-- items grouped by section) -- no buffer lines/folds/highlights. Kept
+-- separate from render_status_body() so toggling a single item's inline
+-- diff (or re-showing already-expanded diffs after a refresh) can re-render
+-- the body from the last real `git status` result without re-running it.
+local function parse_status_fields(stdout)
   local items = {}
   local ui = config.get().ui
   local repository_name = vim.fn.fnamemodify(vim.fn.getcwd(), ":t")
   local header = ui.title and (ui.title .. "  " .. repository_name) or repository_name
-  local lines = { header }
   local branch = ""
-  local line_items = {}
-  local fold_levels = {}
-  local section_nodes = {}
-  local highlights = {}
-  local function highlight(line, start_col, end_col, group)
-    highlights[#highlights + 1] = {
-      line = line,
-      start_col = start_col,
-      end_col = end_col,
-      group = group,
-    }
-  end
   local sections = {
     staged = { label = "Staged changes", items = {} },
     unstaged = { label = "Unstaged changes", items = {} },
@@ -869,69 +908,306 @@ local function parse_status(stdout)
     end
   end
 
+  return header, branch, sections, items
+end
+
+-- A file with both staged and unstaged changes appears as two separate rows
+-- (one per section) sharing the same item identity, so inline-diff
+-- expansion is keyed by (section, path), not by path alone -- matching
+-- docs/issues/0004's requirement that each row use its own section's
+-- comparison.
+local function status_expand_key(section_kind, path)
+  return section_kind .. "\0" .. path
+end
+
+local function find_item_in_section(sections, section_kind, path)
+  local section = sections[section_kind]
+  if not section then return nil end
+  for _, item in ipairs(section.items) do
+    if item.path == path then return item end
+  end
+  return nil
+end
+
+-- Only staged/unstaged rows have a well-defined single comparison: staged
+-- is index-vs-HEAD, unstaged is worktree-vs-index. Untracked/conflict items
+-- are deliberately not offered inline diff (see docs/issues/0004).
+local function fetch_item_diff(root, section_kind, item, callback)
+  local args = section_kind == "staged"
+    and { "diff", "--cached", "--", ":(literal)" .. item.path }
+    or { "diff", "--", ":(literal)" .. item.path }
+  local mode = section_kind == "staged" and "staged" or "working"
+  execute(vim.list_extend({ git_command() }, args), {
+    cwd = root,
+    text = true,
+  }, function(result)
+    schedule(function()
+      if result.code ~= 0 then
+        callback(nil, result.stderr or "git diff failed")
+        return
+      end
+      local diff_lines, diff_fold_levels, diff_line_items = diff.parse(result.stdout or "", { mode = mode, path = item.path })
+      callback({ lines = diff_lines, fold_levels = diff_fold_levels, line_items = diff_line_items })
+    end)
+  end)
+end
+
+-- Offsets a diff.parse() fold-level value (relative to its own line 1) by
+-- `depth`, so an embedded diff's own hunk folds nest correctly inside the
+-- status buffer's existing section(level 1)/item(level 2) fold structure
+-- instead of colliding with it. Verified against Neovim's foldexpr engine:
+-- ">n"/"<n" are absolute levels, not relative increments (:help fold-expr).
+local function offset_fold_level(level, depth)
+  if type(level) == "number" then
+    return level + depth
+  end
+  if type(level) == "string" then
+    local marker, value = level:sub(1, 1), tonumber(level:sub(2))
+    if value then
+      return marker .. (value + depth)
+    end
+  end
+  return level
+end
+
+-- Renders semantic status data (+ any expanded inline diffs) into buffer
+-- lines/folds/highlights/line-items. Never runs Git -- callers that already
+-- have `sections` (a fresh `git status`, or a cached one from
+-- currantgit_status_parsed) can call this directly to re-render without a
+-- round-trip, which is what makes toggling a single item's inline diff (or
+-- restoring expansion state after a refresh) cheap.
+local function render_status_body(header, branch, sections, items, expanded)
+  local ui = config.get().ui
+  local lines = { header }
+  local line_items = {}
+  local fold_levels = {}
+  local section_nodes = {}
+  local highlights = {}
+  local item_sections = {}
+  local function highlight(line, start_col, end_col, group)
+    highlights[#highlights + 1] = {
+      line = line,
+      start_col = start_col,
+      end_col = end_col,
+      group = group,
+    }
+  end
+
   if ui.show_branch then
     lines[#lines + 1] = "Branch: " .. (branch ~= "" and branch or "detached")
     highlight(#lines, 0, #lines[#lines], "CurrantGitBranch")
   end
   highlight(1, 0, #header, "CurrantGitRepository")
-  lines[#lines + 1] = ""
-  lines[#lines + 1] = ui.show_counts and string.format("Changes (%d)", #items) or "Changes"
-  highlight(#lines, 0, #lines[#lines], "CurrantGitHeading")
-  local count_start = lines[#lines]:find("(", 1, true)
-  if count_start then highlight(#lines, count_start - 1, #lines[#lines], "CurrantGitCount") end
-  fold_levels[#lines] = 0
-  local section_order = { "staged", "unstaged", "untracked", "conflicts" }
-  for _, section_kind in ipairs(section_order) do
-    local section = sections[section_kind]
-    if #section.items > 0 then
-      local node = {
-        id = "status:section:" .. section_kind,
-        kind = "section",
-        section_kind = section_kind,
-        label = section.label,
-        count = #section.items,
-        children = section.items,
-        capabilities = { "collapse" },
-      }
-      section_nodes[#section_nodes + 1] = node
-      lines[#lines + 1] = string.format("%s (%d)", section.label, #section.items)
-      highlight(#lines, 0, #lines[#lines], "CurrantGitHeading")
-      local section_count_start = lines[#lines]:find("(", 1, true)
-      if section_count_start then highlight(#lines, section_count_start - 1, #lines[#lines], "CurrantGitCount") end
-      line_items[#lines] = node
-      fold_levels[#lines] = ">1"
-      for _, item in ipairs(section.items) do
-        local label = item.old_path and (item.old_path .. " -> " .. item.path) or item.path
-        local marker = ui.icons[item.change_kind] or item.status
-        lines[#lines + 1] = string.format("%s %s", marker, label)
-        local marker_group = ({
-          added = "CurrantGitStatusAdded",
-          deleted = "CurrantGitStatusDeleted",
-          modified = "CurrantGitStatusModified",
-          renamed = "CurrantGitStatusRenamed",
-          copied = "CurrantGitStatusRenamed",
-          untracked = "CurrantGitStatusUntracked",
-          conflict = "CurrantGitStatusDeleted",
-        })[item.change_kind] or "CurrantGitStatusModified"
-        highlight(#lines, 0, #marker, marker_group)
-        highlight(#lines, #marker + 1, #lines[#lines], "CurrantGitPath")
-        line_items[#lines] = item
-        fold_levels[#lines] = 2
+  -- Fugitive's status buffer omits a section entirely when it's empty
+  -- (`s:AddSection`/`s:AddDiffSection` both early-return on an empty list),
+  -- rather than announcing a zero count. A clean repo gets the same
+  -- treatment here: no "Changes (0)" heading and no "clean" placeholder,
+  -- just the repository/branch header.
+  if #items > 0 then
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = ui.show_counts and string.format("Changes (%d)", #items) or "Changes"
+    highlight(#lines, 0, #lines[#lines], "CurrantGitHeading")
+    local count_start = lines[#lines]:find("(", 1, true)
+    if count_start then highlight(#lines, count_start - 1, #lines[#lines], "CurrantGitCount") end
+    fold_levels[#lines] = 0
+    local section_order = { "staged", "unstaged", "untracked", "conflicts" }
+    for _, section_kind in ipairs(section_order) do
+      local section = sections[section_kind]
+      if #section.items > 0 then
+        local node = {
+          id = "status:section:" .. section_kind,
+          kind = "section",
+          section_kind = section_kind,
+          label = section.label,
+          count = #section.items,
+          children = section.items,
+          capabilities = { "collapse" },
+        }
+        section_nodes[#section_nodes + 1] = node
+        lines[#lines + 1] = string.format("%s (%d)", section.label, #section.items)
+        highlight(#lines, 0, #lines[#lines], "CurrantGitHeading")
+        local section_count_start = lines[#lines]:find("(", 1, true)
+        if section_count_start then highlight(#lines, section_count_start - 1, #lines[#lines], "CurrantGitCount") end
+        line_items[#lines] = node
+        fold_levels[#lines] = ">1"
+        for _, item in ipairs(section.items) do
+          local label = item.old_path and (item.old_path .. " -> " .. item.path) or item.path
+          local marker = ui.icons[item.change_kind] or item.status
+          lines[#lines + 1] = string.format("%s %s", marker, label)
+          local marker_group = ({
+            added = "CurrantGitStatusAdded",
+            deleted = "CurrantGitStatusDeleted",
+            modified = "CurrantGitStatusModified",
+            renamed = "CurrantGitStatusRenamed",
+            copied = "CurrantGitStatusRenamed",
+            untracked = "CurrantGitStatusUntracked",
+            conflict = "CurrantGitStatusDeleted",
+          })[item.change_kind] or "CurrantGitStatusModified"
+          highlight(#lines, 0, #marker, marker_group)
+          highlight(#lines, #marker + 1, #lines[#lines], "CurrantGitPath")
+          line_items[#lines] = item
+          item_sections[#lines] = section_kind
+          local expansion = expanded and expanded[status_expand_key(section_kind, item.path)]
+          if expansion then
+            -- ">2" (not plain 2, which every other item row still uses):
+            -- an explicit fold-start makes this row + its diff an
+            -- independently closeable fold nested in the section's fold,
+            -- instead of merging into the flat run of sibling item rows.
+            fold_levels[#lines] = ">2"
+            local offset = #lines
+            for diff_line, text in ipairs(expansion.lines) do
+              lines[offset + diff_line] = text
+              fold_levels[offset + diff_line] = offset_fold_level(expansion.fold_levels[diff_line], 2)
+              local diff_item = expansion.line_items[diff_line]
+              if diff_item then
+                line_items[offset + diff_line] = diff_item
+                item_sections[offset + diff_line] = section_kind
+              end
+            end
+          else
+            fold_levels[#lines] = 2
+          end
+        end
       end
     end
+    lines[#lines + 1] = ""
+    fold_levels[#lines] = "<1"
   end
-  if #items == 0 and ui.show_clean then
-    lines[#lines + 1] = "  clean"
-    fold_levels[#lines] = 0
-  end
-  lines[#lines + 1] = ""
-  fold_levels[#lines] = "<1"
   lines[#lines + 1] = ""
   fold_levels[#lines] = 0
-  return lines, items, line_items, fold_levels, section_nodes, highlights
+  return lines, line_items, fold_levels, section_nodes, highlights, item_sections
 end
 
-open_status = function(root)
+-- Which section (staged/unstaged/untracked/conflicts) the row under the
+-- cursor belongs to. A file with both staged and unstaged changes renders
+-- as two separate rows sharing one item identity, so this -- not the item
+-- itself -- is what disambiguates which comparison a `=` press means.
+local function current_item_section(buffer)
+  local window = vim.fn.bufwinid(buffer)
+  if window == -1 then
+    return nil
+  end
+  local line = vim.api.nvim_win_get_cursor(window)[1]
+  local item_sections = vim.b[buffer].currantgit_item_sections
+  return item_sections and item_sections[line]
+end
+
+-- Re-renders the status body from the last real `git status` result
+-- (currantgit_status_parsed) plus the current expansion state, without
+-- re-running Git. Used after toggling a single item's inline diff, where
+-- the file list itself hasn't changed. Cursor/view are preserved: expanding
+-- or collapsing only ever inserts/removes lines *after* the toggled row, so
+-- the row the cursor was on keeps the same line number; the clamp below
+-- only matters if the toggle happened to be the last row and the buffer
+-- shrank out from under the cursor.
+local function rerender_status(buffer)
+  local parsed = vim.b[buffer].currantgit_status_parsed
+  if not parsed then
+    return
+  end
+  -- Bumping here (not just at fetch-kickoff in toggle_item_diff) means ANY
+  -- render -- a different toggle, or a full refresh landing via
+  -- open_status -- invalidates whatever single-item fetches were still in
+  -- flight when it started, not just the one that triggered this render.
+  vim.b[buffer].currantgit_status_generation = (vim.b[buffer].currantgit_status_generation or 0) + 1
+  local expanded = vim.b[buffer].currantgit_expanded or {}
+  local window = vim.fn.bufwinid(buffer)
+  local cursor = window ~= -1 and vim.api.nvim_win_get_cursor(window)
+  local lines, line_items, fold_levels, section_nodes, highlights, item_sections =
+    render_status_body(parsed.header, parsed.branch, parsed.sections, parsed.items, expanded)
+  set_buffer(lines, parsed.items, "status", line_items, parsed.root, fold_levels, highlights, nil, {
+    item_sections = item_sections,
+    expanded = expanded,
+    parsed = parsed,
+  })
+  vim.b[buffer].currantgit_sections = section_nodes
+  if window ~= -1 and cursor then
+    local line_count = vim.api.nvim_buf_line_count(buffer)
+    local line = math.min(cursor[1], line_count)
+    local text = vim.api.nvim_buf_get_lines(buffer, line - 1, line, false)[1] or ""
+    local column = math.min(cursor[2], math.max(#text - 1, 0))
+    pcall(vim.api.nvim_win_set_cursor, window, { line, column })
+  end
+end
+
+-- Toggles inline diff display for one (section, item) pair. Collapsing is
+-- synchronous (just drops the cached diff and re-renders); expanding fetches
+-- the diff first and only re-renders on success, so a failed `git diff`
+-- leaves the status projection and repository untouched, per
+-- docs/issues/0004's safety boundary. `generation` guards against a
+-- slow-to-arrive expand response being applied after a newer render (a
+-- refresh, or a different toggle) has already superseded it.
+local function toggle_item_diff(buffer, section_kind, item)
+  local key = status_expand_key(section_kind, item.path)
+  local expanded = vim.b[buffer].currantgit_expanded or {}
+  if expanded[key] then
+    expanded[key] = nil
+    vim.b[buffer].currantgit_expanded = expanded
+    rerender_status(buffer)
+    return
+  end
+  local parsed = vim.b[buffer].currantgit_status_parsed
+  if not parsed then
+    return
+  end
+  local generation = vim.b[buffer].currantgit_status_generation or 0
+  fetch_item_diff(parsed.root, section_kind, item, function(result, fetch_error)
+    if not vim.api.nvim_buf_is_valid(buffer) or vim.b[buffer].currantgit_status_generation ~= generation then
+      return
+    end
+    if not result then
+      vim.notify("CurrantGit: " .. (fetch_error or "git diff failed"), vim.log.levels.ERROR)
+      return
+    end
+    local current_expanded = vim.b[buffer].currantgit_expanded or {}
+    current_expanded[key] = result
+    vim.b[buffer].currantgit_expanded = current_expanded
+    rerender_status(buffer)
+  end)
+end
+
+-- Re-fetches the diff for every previously-expanded item that still exists
+-- in the freshly parsed `sections` (docs/issues/0004: "should survive a
+-- refresh when the corresponding change still exists"), refetching rather
+-- than reusing stale cached content since a refresh commonly follows the
+-- very stage/unstage/discard action that changed what that diff shows.
+-- Items whose change vanished are silently dropped. `done` fires once with
+-- the resulting expansion table (possibly empty) after every fetch settles.
+local function refresh_expanded_diffs(root, sections, previous_expanded, done)
+  local pending = {}
+  for key in pairs(previous_expanded or {}) do
+    -- `%z` (not a literal \0) matches the embedded NUL byte: LuaJIT/Lua 5.1
+    -- pattern parsing truncates a pattern string at a literal embedded \0,
+    -- even though the *subject* string handles embedded NULs fine -- `%z`
+    -- is the documented Lua 5.1 escape for matching one within a pattern.
+    -- Verified empirically: `key:match("^(.-)\0(.*)$")` silently returns
+    -- ("", nil) instead of splitting on the NUL.
+    local section_kind, path = key:match("^(.-)%z(.*)$")
+    local item = find_item_in_section(sections, section_kind, path)
+    if item then
+      pending[#pending + 1] = { key = key, section_kind = section_kind, item = item }
+    end
+  end
+  if #pending == 0 then
+    done({})
+    return
+  end
+  local expanded = {}
+  local remaining = #pending
+  for _, entry in ipairs(pending) do
+    fetch_item_diff(root, entry.section_kind, entry.item, function(result)
+      if result then
+        expanded[entry.key] = result
+      end
+      remaining = remaining - 1
+      if remaining == 0 then
+        done(expanded)
+      end
+    end)
+  end
+end
+
+open_status = function(root, mods)
   local error_message
   if not root then
     root, error_message = repository_root()
@@ -941,23 +1217,42 @@ open_status = function(root)
     return
   end
 
+  state.status_request = state.status_request + 1
+  local request = state.status_request
+
   execute({ git_command(), "status", "--porcelain=v1", "-z", "--branch" }, {
     cwd = root,
     text = true,
   }, function(result)
     schedule(function()
+      if request ~= state.status_request then return end
       if result.code ~= 0 then
         vim.notify("CurrantGit: " .. (result.stderr or "git status failed"), vim.log.levels.ERROR)
         return
       end
-      local lines, items, line_items, fold_levels, section_nodes, highlights = parse_status(result.stdout or "")
-      set_buffer(lines, items, "status", line_items, root, fold_levels, highlights)
-      vim.b.currantgit_sections = section_nodes
+      local header, branch, sections, items = parse_status_fields(result.stdout or "")
+      local previous_buffer = vim.fn.bufnr("currantgit://status")
+      local previous_expanded = (previous_buffer >= 0 and vim.api.nvim_buf_is_valid(previous_buffer))
+        and vim.b[previous_buffer].currantgit_expanded or nil
+      refresh_expanded_diffs(root, sections, previous_expanded, function(expanded)
+        if request ~= state.status_request then return end
+        local lines, line_items, fold_levels, section_nodes, highlights, item_sections =
+          render_status_body(header, branch, sections, items, expanded)
+        local buffer = set_buffer(lines, items, "status", line_items, root, fold_levels, highlights, mods, {
+          item_sections = item_sections,
+          expanded = expanded,
+          parsed = { header = header, branch = branch, sections = sections, items = items, root = root },
+        })
+        -- Invalidate any single-item expand fetch still in flight from
+        -- before this refresh landed -- see rerender_status's comment.
+        vim.b[buffer].currantgit_status_generation = (vim.b[buffer].currantgit_status_generation or 0) + 1
+        vim.b.currantgit_sections = section_nodes
+      end)
     end)
   end)
 end
 
-local function run_git(args)
+local function run_git(args, mods)
   local root, error_message = repository_root()
   if not root then
     vim.notify("CurrantGit: " .. error_message, vim.log.levels.ERROR)
@@ -973,7 +1268,7 @@ local function run_git(args)
       if result.code ~= 0 then
         output = (result.stderr or "git command failed") .. "\n" .. output
       end
-      set_buffer(vim.split(vim.trim(output), "\n", { plain = true }), {}, "command")
+      set_buffer(vim.split(vim.trim(output), "\n", { plain = true }), {}, "command", nil, nil, nil, nil, mods)
     end)
   end)
 end
@@ -1004,11 +1299,11 @@ open_activity = function()
   navigation.visit(0)
 end
 
-function M.git(args)
+function M.git(args, mods)
   if #args == 0 or args[1] == "status" then
-    open_status()
+    open_status(nil, mods)
   elseif args[1] == "diff" then
-    open_diff_args(args)
+    open_diff_args(args, nil, mods)
   elseif args[1] == "blame" then
     local path = args[2] or vim.fn.expand("%:~:.")
     if path == "" or vim.bo.filetype == "currantgit" then
@@ -1017,9 +1312,9 @@ function M.git(args)
     end
     open_blame(path)
   elseif args[1] == "log" and git_log.arguments(args) then
-    open_log(args)
+    open_log(args, nil, mods)
   else
-    run_git(args)
+    run_git(args, mods)
   end
 end
 
@@ -1093,6 +1388,44 @@ function M.setup(opts)
         context.unstage(item)
       else
         context.stage(item)
+      end
+      return true
+    end,
+  })
+  actions.register({
+    id = "item.diff_toggle",
+    label = "toggle diff",
+    key = "=",
+    desc = "toggle inline diff",
+    applies_to = { "change" },
+    -- Only staged/unstaged rows have one well-defined comparison (index-vs-
+    -- HEAD, worktree-vs-index respectively); untracked/conflict items don't
+    -- pretend `=` is available, per docs/issues/0004.
+    is_available = function(context, _)
+      local section_kind = current_item_section(context.buffer)
+      return section_kind == "staged" or section_kind == "unstaged"
+    end,
+    run = function(context, item)
+      local section_kind = current_item_section(context.buffer)
+      if section_kind ~= "staged" and section_kind ~= "unstaged" then
+        return false, "diff toggle only available for staged or unstaged changes"
+      end
+      toggle_item_diff(context.buffer, section_kind, item)
+      return true
+    end,
+  })
+  actions.register({
+    id = "section.toggle_fold",
+    label = "toggle section",
+    key = "=",
+    desc = "expand or collapse section",
+    applies_to = { "section" },
+    run = function(context, _)
+      local window = vim.fn.bufwinid(context.buffer)
+      if window ~= -1 then
+        vim.api.nvim_win_call(window, function()
+          vim.cmd("normal! za")
+        end)
       end
       return true
     end,
@@ -1185,7 +1518,7 @@ function M.setup(opts)
       vim.notify("CurrantGit: " .. error_message, vim.log.levels.ERROR)
       return
     end
-    M.git(args)
+    M.git(args, command.mods)
   end, {
     bang = true,
     nargs = "*",
