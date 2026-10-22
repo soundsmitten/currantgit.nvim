@@ -434,6 +434,7 @@ function M.open(status_item, root)
           vim.b[buffer].currantgit_root = root
           attach_pane(buffer, deps.dispatch)
         end
+        panes.map_quit({ ours_buffer, result, theirs_buffer }, "currantgit_conflict")
       end)
     end)
     end)

@@ -129,7 +129,16 @@ local function test_diff_split()
   assert(vim.fn.resolve(vim.api.nvim_buf_get_name(panes.new)) == vim.fn.resolve(dir .. "/" .. ODD))
   assert(vim.bo[panes.new].buftype == "" and vim.bo[panes.new].modifiable, "worktree side is the real file")
   assert(old_bar:find("index", 1, true) and new_bar:find("worktree", 1, true), old_bar .. " | " .. new_bar)
-  vim.cmd("tabclose")
+  -- gq from the worktree side closes the tab, and leaves no mapping behind
+  -- on the user's real file.
+  local worktree_buffer = panes.new
+  press("gq")
+  assert(vim.t.currantgit_diff_split == nil and vim.api.nvim_get_current_buf() == status_buffer,
+    "gq should close the diff split tab")
+  assert(vim.fn.maparg("gq", "n", false, true).buffer ~= 1)
+  vim.api.nvim_buf_call(worktree_buffer, function()
+    assert(vim.fn.maparg("gq", "n", false, true).buffer ~= 1, "gq must not stay on the real file")
+  end)
 
   -- Staged: HEAD vs index, both read-only.
   panes, old_bar, new_bar = split(status_buffer, ODD, "staged")
@@ -137,7 +146,9 @@ local function test_diff_split()
   assert(text(panes.new) == git({ "show", ":0:" .. ODD }, dir))
   assert(vim.bo[panes.new].readonly and not vim.bo[panes.new].modifiable)
   assert(old_bar:find("HEAD " .. head, 1, true) and new_bar:find("index", 1, true), old_bar .. " | " .. new_bar)
-  vim.cmd("tabclose")
+  vim.cmd("wincmd h")
+  press("gq")
+  assert(vim.t.currantgit_diff_split == nil, "gq from the old side should close the tab")
 
   -- Added and deleted files get an empty, labelled side.
   panes, old_bar = split(status_buffer, "new.txt", "staged")

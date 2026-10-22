@@ -23,6 +23,10 @@ and deleted files get an empty labelled side. No Git mutation was added.
 - Key: `D`, not Fugitive's `dv`: `d` is already a single-key mapping here,
   so `dv` would make `d` wait for 'timeoutlen'.
 
+- `gq` closes either view's tab from any pane (`panes.map_quit`); the
+  mapping is dropped on `BufWinLeave` so the real worktree file doesn't
+  keep it.
+
 ## Evidence
 
 - `tests/diffsplit.lua` (wired into `tests/smoke.lua`), written first and

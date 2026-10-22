@@ -116,4 +116,25 @@ function M.diff_tab()
   end
 end
 
+-- `gq` closes the view's tab from any of its panes. The mapping is removed
+-- when a buffer leaves its window, so the user's real file doesn't keep it.
+function M.map_quit(buffers, tab_var)
+  local function quit()
+    if vim.t[tab_var] == nil then return end
+    if #vim.api.nvim_list_tabpages() > 1 then
+      vim.cmd("tabclose")
+    else
+      vim.cmd("only")
+    end
+  end
+  for _, buffer in ipairs(buffers) do
+    vim.keymap.set("n", "gq", quit, { buffer = buffer, silent = true, desc = "CurrantGit: close view" })
+    vim.api.nvim_create_autocmd("BufWinLeave", {
+      buffer = buffer,
+      once = true,
+      callback = function() pcall(vim.keymap.del, "n", "gq", { buffer = buffer }) end,
+    })
+  end
+end
+
 return M

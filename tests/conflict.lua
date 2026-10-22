@@ -352,7 +352,8 @@ local function test_resolver_interactions()
 
   -- Nothing here wrote the file or touched the index.
   assert(not vim.bo[panes.result].modified)
-  vim.cmd("tabclose")
+  press("gq")
+  assert(vim.t.currantgit_conflict == nil, "gq should close the resolver tab")
   assert(vim.api.nvim_get_current_buf() == status_buffer)
   assert(vim.deep_equal(before, snapshot(dir)), "resolver interactions changed repository state")
   vim.cmd("cd " .. vim.fn.fnameescape(original_cwd))

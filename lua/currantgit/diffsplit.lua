@@ -113,6 +113,7 @@ function M.open(item, root, section)
         vim.t.currantgit_diff_split = {
           old = old_buffer, new = new_buffer, root = root, path = item.path, section = section,
         }
+        panes.map_quit({ old_buffer, new_buffer }, "currantgit_diff_split")
       end)
     end)
   end)
