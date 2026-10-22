@@ -464,13 +464,79 @@ vim.wait(5000, function()
 end)
 assert_no_async_errors()
 
+vim.cmd("Git rev-parse --verify currantgit-missing-ref")
+vim.wait(5000, function()
+  for _, entry in ipairs(require("currantgit").command_log()) do
+    if entry.code ~= 0 then return true end
+  end
+  return false
+end)
+vim.cmd("Git status")
+vim.wait(5000, function() return vim.b.currantgit_title == "status" end)
 vim.cmd("GitActivity")
 vim.wait(2000, function()
   return vim.b.currantgit_title == "activity"
 end)
 assert(vim.b.currantgit_title == "activity", ":GitActivity did not open the activity surface")
 assert(#require("currantgit").command_log() > 0, "activity log should contain Git commands")
-assert_contains(vim.api.nvim_buf_get_lines(0, 0, -1, false), "git status")
+do
+  local activity_buffer = vim.api.nvim_get_current_buf()
+  local activity_lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
+  assert_contains(activity_lines, "status")
+  for _, line in ipairs(activity_lines) do
+    assert(not line:find("%z"), "activity buffer must not contain raw NUL bytes: " .. vim.inspect(line))
+    assert(not line:find("[\1-\8\11-\31]"), "activity buffer must not contain raw control bytes: " .. vim.inspect(line))
+  end
+  local line_items = vim.b.currantgit_line_items
+  local rows = {}
+  for line = 1, #activity_lines do
+    local item = line_items[line]
+    if type(item) == "table" and item.kind == "activity" then rows[#rows + 1] = { line = line, item = item } end
+  end
+  assert(#rows == #require("currantgit").command_log(), "every command should project one activity row")
+  assert(rows[1].item.id == "activity:" .. #require("currantgit").command_log(), "newest command should be first")
+  local failed, succeeded
+  for _, row in ipairs(rows) do
+    if row.item.code ~= 0 and not failed then failed = row end
+    if row.item.code == 0 and row.item.has_output and not succeeded then succeeded = row end
+  end
+  assert(failed, "expected a failed command in the activity ledger")
+  assert(succeeded, "expected a successful command with output in the activity ledger")
+  assert(activity_lines[failed.line]:find("✗", 1, true), "failed row needs a failure marker")
+  assert(activity_lines[failed.line]:find("exit " .. failed.item.code, 1, true), "failed row should show its exit code")
+  assert(activity_lines[succeeded.line]:find("✓", 1, true), "successful row needs a success marker")
+  assert(not activity_lines[succeeded.line]:find("exit ", 1, true), "successful row should not show an exit code")
+  assert(activity_lines[succeeded.line]:find("%d%d:%d%d:%d%d"), "row should show a timestamp")
+  assert(not activity_lines[succeeded.line]:find("git ", 1, true), "row should omit the git executable")
+  assert(vim.fn.foldclosed(succeeded.line + 1) == succeeded.line, "successful output should start folded")
+  assert(vim.fn.foldclosed(failed.line + 1) == -1, "failed output should start expanded")
+  vim.api.nvim_win_set_cursor(0, { succeeded.line, 0 })
+  assert(currantgit.which_key()["="], "activity rows should expose = through action discovery")
+  local toggle_mapping = vim.fn.maparg("=", "n", false, true)
+  assert(toggle_mapping.callback, "activity = mapping was not registered")
+  toggle_mapping.callback()
+  assert(vim.fn.foldclosed(succeeded.line + 1) == -1, "= should open the row's output")
+  local open_mapping = vim.fn.maparg("<CR>", "n", false, true)
+  assert(open_mapping.callback, "activity <CR> mapping was not registered")
+  open_mapping.callback()
+  assert(vim.fn.foldclosed(succeeded.line + 1) == succeeded.line, "<CR> should close the row's output again")
+  vim.fn.maparg("g?", "n", false, true).callback()
+  assert_contains(vim.api.nvim_buf_get_lines(0, 0, -1, false), "Show or hide this command's output")
+  vim.fn.maparg("g?", "n", false, true).callback()
+  local refresh_mapping = vim.fn.maparg("r", "n", false, true)
+  assert(refresh_mapping.callback, "activity refresh mapping was not registered")
+  -- Clear the projection so only a real re-render can restore it.
+  vim.b.currantgit_line_items = {}
+  refresh_mapping.callback()
+  assert(vim.api.nvim_get_current_buf() == activity_buffer, "refresh should reuse the activity buffer")
+  local newest
+  for line = 1, vim.api.nvim_buf_line_count(0) do
+    local item = vim.b.currantgit_line_items[line]
+    if type(item) == "table" and item.kind == "activity" then newest = item break end
+  end
+  assert(newest and newest.id == "activity:" .. #require("currantgit").command_log(),
+    "refresh should project the newest command first")
+end
 local activity_back_mapping = vim.fn.maparg("<C-O>", "n", false, true)
 assert(activity_back_mapping.callback, "activity back mapping was not registered")
 activity_back_mapping.callback()
@@ -560,6 +626,8 @@ assert_no_async_errors()
 dofile(vim.env.CURRANTGIT_ROOT .. "/tests/safety.lua")
 assert_no_async_errors()
 dofile(vim.env.CURRANTGIT_ROOT .. "/tests/visual.lua")
+assert_no_async_errors()
+dofile(vim.env.CURRANTGIT_ROOT .. "/tests/conflict.lua")
 assert_no_async_errors()
 print("CurrantGit smoke: ok")
 vim.cmd("qa!")

@@ -5,6 +5,7 @@ CONTENTS                                                     *currantgit-content
 
 COMMANDS                                                        |:Git|
 STATUS                                                   *currantgit-status*
+CONFLICTS                                             |currantgit-conflicts|
 LOG                                                         |currantgit-log|
 CONFIGURATION                                       *currantgit-configuration*
 NAVIGATION                                           *currantgit-navigation*
@@ -125,6 +126,13 @@ CurrantGitAction            Compact discovery line (SpecialKey)
 CurrantGitHelpHeading       Inline-help heading (Title)
 CurrantGitHelpKey           Inline-help keys (SpecialKey)
 CurrantGitHelpDescription   Inline-help descriptions (Comment)
+CurrantGitActivitySuccess   Activity success marker (DiagnosticOk)
+CurrantGitActivityFailure   Activity failure marker and exit code (DiagnosticError)
+CurrantGitActivityTime      Activity timestamps (Comment)
+CurrantGitActivityDuration  Activity durations (Number)
+CurrantGitActivityCommand   Activity argv (Statement)
+CurrantGitActivityOutput    Folded command output (Comment)
+CurrantGitActivityStderr    Failed commands' stderr (DiagnosticWarn)
 
 The inline help is ordinary read-only buffer content derived from the same
 contextual action registry as the mappings and compact discovery line. It can
@@ -151,9 +159,86 @@ buffer remains available beside the read-only attribution buffer. `gq` closes
 the blame companion and returns to the source buffer. `<CR>` on an attribution
 row opens its commit view; Ctrl-O returns to blame.
 
-`:GitActivity` shows the bounded command ledger: argv, duration, exit code,
-and summarized output. It is an inspection surface, not a replacement for
-the status projection.
+`:GitActivity` shows the bounded command ledger, newest first. Each row is
+one Git command: a ✓/✗ status marker, the local HH:MM:SS start time, the
+duration, and argv without the leading `git`. Failed rows end in `exit N`.
+A repository path heading appears whenever the working directory changes
+from the previous row. Command output sits in a native fold under its row,
+closed by default; failed commands start expanded so their stderr is
+visible. NUL separators from `-z` commands render as line breaks and other
+control bytes as `<xx>`, so the buffer never contains raw control bytes.
+
+Each row is an `activity:<n>` item in `b:currantgit_line_items`, where `n`
+is the command's position in the ledger. `<CR>` or `=` toggles the row's
+output (ordinary `zo`/`zc` work too), `r` refreshes, and `g?` shows the
+available actions. It is an inspection surface, not a replacement for the
+status projection.
+
+===============================================================================
+CONFLICTS                                                 *currantgit-conflicts*
+
+Each row in the status Conflicts section is a `conflict-file:<path>` item,
+and each conflict region inside it is a `conflict:<path>:<n>` item. This
+first slice is read-only: nothing here writes the index or the worktree.
+
+Sides come from the index stages, not from re-reading markers you may already
+have edited: `git ls-files -u` says which stages exist, `git merge-file
+--object-id` re-merges them (honoring `merge.conflictStyle`, which decides how
+many regions there are), and the panes show `git show :1:`/`:2:`/`:3:<path>`.
+Region locations come from the markers still in the worktree file. A region
+whose markers are gone counts as resolved.
+
+The row shows `resolved/total`, or why there is no count: `deleted by us`,
+`deleted by them`, `deleted by both`, or `binary`.
+
+In status:
+
+<CR>                    On a conflict row, open the resolver in a new tab.
+]x  [x                  Jump to the next/previous conflict row. Stops at the
+                        ends, like |]c|.
+s  -  d  b              Stage, toggle, diff, and blame behave as on a change
+                        item (staging is `git add`, i.e. Git's own "mark
+                        resolved"). Discard and unstage are not offered.
+
+The resolver is ours (stage 2, read-only) | result (the real file) | theirs
+(stage 3, read-only), all in native |diff-mode|, so |]c| and |[c| work. With
+three diff buffers, |do| and |dp| need a buffer argument, e.g.
+`:diffget currantgit://conflict/ours/<path>`. A missing side (delete/modify)
+is an empty pane labelled "(deleted)". Save and undo are Vim's own.
+
+In the resolver:
+
+]x  [x                  In the result pane, jump to the next/previous
+                        conflict region.
+gb                      Show or hide the merge base (stage 1) under the
+                        result pane. It is read-only and stays out of diff
+                        mode.
+
+Presentation: each side has its own colors in its pane and inside the
+result's conflict blocks, filler lines are hatched (`diff:╱` in
+'fillchars'), marker lines keep their real text with an end-of-line label,
+and the result winbar shows "n of m resolved" as you edit. Word-level
+highlights come from your 'diffopt' (`inline:word` or `inline:char`);
+CurrantGit does not change that global option. Override these groups to
+restyle it. The tints are mixed from your colorscheme's DiagnosticInfo
+(cool) and DiagnosticWarn (warm) colors over Normal, and recomputed on
+|ColorScheme|:
+
+CurrantGitConflictOurs          Ours lines (cool tint)
+CurrantGitConflictOursText      Changed text on ours lines
+CurrantGitConflictOursLabel     The "ours" marker label
+CurrantGitConflictTheirs        Theirs lines (warm tint)
+CurrantGitConflictTheirsText    Changed text on theirs lines
+CurrantGitConflictTheirsLabel   The "theirs" marker label
+CurrantGitConflictBase          Base text in diff3/zdiff3 blocks (dimmed)
+CurrantGitConflictBaseLabel     The "base" marker label
+CurrantGitConflictMarker        Marker lines (dimmed, still real text)
+CurrantGitConflictFiller        Hatched filler (faint, instead of DiffDelete)
+CurrantGitConflictResult        Diff colors in the result pane (none, so
+                                only the region tints show)
+
+Markers are assumed to be the default 7 characters; a custom
+`conflict-marker-size` attribute is not read yet.
 
 ===============================================================================
 LOG                                                             *currantgit-log*
