@@ -24,12 +24,18 @@ local HIGHLIGHTS = {
   CurrantGitConflictBase = "Comment",
   CurrantGitConflictMarker = "NonText",
   CurrantGitConflictLabel = "Special",
+  CurrantGitConflictFiller = "NonText",
 }
 
+-- In diff mode DiffDelete only paints filler; in a conflict the gap means
+-- "the other side has lines here", not "deleted", so it gets a neutral color.
+local FILLER_HIGHLIGHT = "DiffDelete:CurrantGitConflictFiller"
 local SIDE_HIGHLIGHT = {
-  ours = "DiffAdd:CurrantGitConflictOurs,DiffChange:CurrantGitConflictOurs,DiffText:CurrantGitConflictOursText",
+  result = FILLER_HIGHLIGHT,
+  ours = "DiffAdd:CurrantGitConflictOurs,DiffChange:CurrantGitConflictOurs,DiffText:CurrantGitConflictOursText,"
+    .. FILLER_HIGHLIGHT,
   theirs = "DiffAdd:CurrantGitConflictTheirs,DiffChange:CurrantGitConflictTheirs,"
-    .. "DiffText:CurrantGitConflictTheirsText",
+    .. "DiffText:CurrantGitConflictTheirsText," .. FILLER_HIGHLIGHT,
 }
 
 -- `git help merge-file`: markers are 7 characters by default. A marker is
@@ -432,6 +438,7 @@ function M.open(status_item, root)
         vim.wo.winbar = label("theirs", item, names)
         vim.wo.winhighlight = SIDE_HIGHLIGHT.theirs
         vim.api.nvim_set_current_win(result_window)
+        vim.wo.winhighlight = SIDE_HIGHLIGHT.result
         for _, window in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
           vim.api.nvim_win_call(window, function() vim.cmd("diffthis") end)
           fill_with_hatching(window)

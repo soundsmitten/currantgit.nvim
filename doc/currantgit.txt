@@ -187,6 +187,8 @@ CurrantGitConflictTheirsText  Changed text on theirs lines (DiffText)
 CurrantGitConflictBase        Base lines in diff3/zdiff3 blocks (Comment)
 CurrantGitConflictMarker      Marker lines (NonText)
 CurrantGitConflictLabel       Marker labels (Special)
+CurrantGitConflictFiller      Hatched filler lines (NonText), instead of the
+                              usual DiffDelete red
 
 Markers are assumed to be the default 7 characters; a custom
 `conflict-marker-size` attribute is not read yet.

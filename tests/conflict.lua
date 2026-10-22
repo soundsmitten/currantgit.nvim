@@ -290,7 +290,11 @@ local function test_resolver_interactions()
   -- winbar tracks resolution live.
   assert(vim.wo[windows[1]].winhighlight:find("DiffAdd:CurrantGitConflictOurs", 1, true))
   assert(vim.wo[windows[3]].winhighlight:find("DiffAdd:CurrantGitConflictTheirs", 1, true))
-  for _, window in ipairs(windows) do assert(vim.wo[window].fillchars:find("diff:╱", 1, true)) end
+  for _, window in ipairs(windows) do
+    assert(vim.wo[window].fillchars:find("diff:╱", 1, true))
+    assert(vim.wo[window].winhighlight:find("DiffDelete:CurrantGitConflictFiller", 1, true),
+      "filler must not use the red 'deleted' color")
+  end
   assert(vim.wo[windows[1]].winbar:find("ours", 1, true) and vim.wo[windows[1]].winbar:find("main", 1, true))
   assert(vim.wo[windows[3]].winbar:find("theirs", 1, true) and vim.wo[windows[3]].winbar:find("other", 1, true))
   assert(vim.wo[windows[2]].winbar:find("0 of 2 resolved", 1, true), vim.wo[windows[2]].winbar)
