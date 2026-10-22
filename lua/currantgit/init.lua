@@ -2,6 +2,7 @@ local M = {}
 local config = require("currantgit.config")
 local actions = require("currantgit.actions")
 local blame = require("currantgit.blame")
+local conflict = require("currantgit.conflict")
 local diff = require("currantgit.diff")
 local git_log = require("currantgit.log")
 local navigation = require("currantgit.navigation")
@@ -553,7 +554,9 @@ local function attach_status(buffer)
   local map = function(mode, lhs, rhs)
     vim.keymap.set(mode, lhs, rhs, { buffer = buffer, silent = true, desc = "CurrantGit" })
   end
-  map("n", "<CR>", function() dispatch_current(buffer, "item.open") end)
+  map("n", "<CR>", function() dispatch_current_key(buffer, "<CR>") end)
+  map("n", "]x", function() dispatch_current(buffer, "conflict.next") end)
+  map("n", "[x", function() dispatch_current(buffer, "conflict.prev") end)
   map("n", "d", function() dispatch_current(buffer, "item.diff") end)
   map("n", "b", function() dispatch_current(buffer, "item.blame") end)
   map("n", "s", function() dispatch_current(buffer, "item.stage") end)
@@ -884,8 +887,8 @@ local function parse_status_fields(stdout)
       local is_untracked = status == "??"
       local is_conflict = UNMERGED_STATUS_CODES[status] == true
       local item = {
-        id = "change:" .. path,
-        kind = "change",
+        id = (is_conflict and "conflict-file:" or "change:") .. path,
+        kind = is_conflict and "conflict-file" or "change",
         change_kind = is_conflict and "conflict" or change_kind,
         path = path,
         old_path = old_path,
@@ -1033,7 +1036,8 @@ local function render_status_body(header, branch, sections, items, expanded)
         for _, item in ipairs(section.items) do
           local label = item.old_path and (item.old_path .. " -> " .. item.path) or item.path
           local marker = ui.icons[item.change_kind] or item.status
-          lines[#lines + 1] = string.format("%s %s", marker, label)
+          local note = item.kind == "conflict-file" and conflict.describe(item)
+          lines[#lines + 1] = string.format("%s %s", marker, label) .. (note and "  " .. note or "")
           local marker_group = ({
             added = "CurrantGitStatusAdded",
             deleted = "CurrantGitStatusDeleted",
@@ -1044,7 +1048,8 @@ local function render_status_body(header, branch, sections, items, expanded)
             conflict = "CurrantGitStatusDeleted",
           })[item.change_kind] or "CurrantGitStatusModified"
           highlight(#lines, 0, #marker, marker_group)
-          highlight(#lines, #marker + 1, #lines[#lines], "CurrantGitPath")
+          highlight(#lines, #marker + 1, #marker + 1 + #label, "CurrantGitPath")
+          if note then highlight(#lines, #lines[#lines] - #note, #lines[#lines], "CurrantGitCount") end
           line_items[#lines] = item
           item_sections[#lines] = section_kind
           local expansion = expanded and expanded[status_expand_key(section_kind, item.path)]
@@ -1236,17 +1241,20 @@ open_status = function(root, mods)
         and vim.b[previous_buffer].currantgit_expanded or nil
       refresh_expanded_diffs(root, sections, previous_expanded, function(expanded)
         if request ~= state.status_request then return end
-        local lines, line_items, fold_levels, section_nodes, highlights, item_sections =
-          render_status_body(header, branch, sections, items, expanded)
-        local buffer = set_buffer(lines, items, "status", line_items, root, fold_levels, highlights, mods, {
-          item_sections = item_sections,
-          expanded = expanded,
-          parsed = { header = header, branch = branch, sections = sections, items = items, root = root },
-        })
-        -- Invalidate any single-item expand fetch still in flight from
-        -- before this refresh landed -- see rerender_status's comment.
-        vim.b[buffer].currantgit_status_generation = (vim.b[buffer].currantgit_status_generation or 0) + 1
-        vim.b.currantgit_sections = section_nodes
+        conflict.annotate(root, sections.conflicts.items, function()
+          if request ~= state.status_request then return end
+          local lines, line_items, fold_levels, section_nodes, highlights, item_sections =
+            render_status_body(header, branch, sections, items, expanded)
+          local buffer = set_buffer(lines, items, "status", line_items, root, fold_levels, highlights, mods, {
+            item_sections = item_sections,
+            expanded = expanded,
+            parsed = { header = header, branch = branch, sections = sections, items = items, root = root },
+          })
+          -- Invalidate any single-item expand fetch still in flight from
+          -- before this refresh landed -- see rerender_status's comment.
+          vim.b[buffer].currantgit_status_generation = (vim.b[buffer].currantgit_status_generation or 0) + 1
+          vim.b.currantgit_sections = section_nodes
+        end)
       end)
     end)
   end)
@@ -1356,7 +1364,7 @@ function M.setup(opts)
     id = "item.stage",
     label = "stage",
     key = "s",
-    applies_to = { "change" },
+    applies_to = { "change", "conflict-file" },
     is_available = function(_, item)
       return item.status == "??" or item.status:sub(2, 2) ~= " "
     end,
@@ -1382,7 +1390,7 @@ function M.setup(opts)
     id = "item.toggle",
     label = "toggle staged",
     key = "-",
-    applies_to = { "change" },
+    applies_to = { "change", "conflict-file" },
     run = function(context, item)
       if item.status ~= "??" and item.status:sub(1, 1) ~= " " then
         context.unstage(item)
@@ -1492,7 +1500,7 @@ function M.setup(opts)
     id = "item.diff",
     label = "diff",
     key = "d",
-    applies_to = { "change" },
+    applies_to = { "change", "conflict-file" },
     run = function(context, item)
       context.diff(item)
       return true
@@ -1502,7 +1510,7 @@ function M.setup(opts)
     id = "item.blame",
     label = "blame",
     key = "b",
-    applies_to = { "change" },
+    applies_to = { "change", "conflict-file" },
     is_available = function(_, item)
       return item.change_kind ~= "deleted"
     end,
@@ -1511,6 +1519,16 @@ function M.setup(opts)
       return true
     end,
   })
+
+  conflict.setup({
+    run = function(root, args, callback, input)
+      execute(vim.list_extend({ git_command() }, args), { cwd = root, text = true }, function(result)
+        schedule(function() callback(result) end)
+      end, input)
+    end,
+    dispatch = dispatch_current,
+  })
+  conflict.register(actions, conflict.open)
 
   vim.api.nvim_create_user_command("Git", function(command)
     local args, error_message = split_args(command.args)

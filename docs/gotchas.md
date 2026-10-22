@@ -185,6 +185,16 @@ these, see [`decisions/`](decisions/).
   empty output (nothing to compare). All three are ordinary Git behavior a
   caller must be ready to see, not edge cases specific to this codebase.
 
+- **The number of conflict regions depends on `merge.conflictStyle`.** The
+  default `merge` style pulls lines both sides agree on out of a conflict and
+  can coalesce two nearby conflicts into one region; `diff3` and `zdiff3`
+  keep them as two (verified with real `git merge` and `git merge-file`). Any
+  "resolved/total" count must re-merge with the repository's own style --
+  `git merge-file` honors `merge.conflictStyle` from config -- or it will
+  disagree with the markers Git actually wrote. `git merge-file` exits with
+  the conflict count (capped at 127), and above 127 on error such as binary
+  content.
+
 ## Neovim / test harness
 
 - **A valid buffer ID does not make a saved cursor or window view valid after
