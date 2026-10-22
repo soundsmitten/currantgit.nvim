@@ -74,22 +74,23 @@ for _, action in ipairs(currantgit.discovery()) do discovered[action.id] = true 
 assert(discovered["commit.open"] and discovered["surface.refresh"] and discovered["surface.help"])
 assert(not discovered["item.stage"] and not discovered["item.discard"])
 assert(currantgit.which_key()["<CR>"].desc == "open commit")
-assert(vim.api.nvim_buf_get_lines(0, -2, -1, false)[1]:find("<CR> open commit", 1, true))
-
-local notifications = {}
-local notify = vim.notify
-vim.notify = function(message) notifications[#notifications + 1] = message end
+local function footer()
+  return table.concat(vim.api.nvim_buf_get_lines(0, vim.b.currantgit_footer_start - 1, -1, false), "\n")
+end
+assert(footer():find("Available actions", 1, true), "log should render the action list")
+assert(footer():find("\n<CR>%s+open commit"), "log action list should offer open commit on a commit row")
+assert(not footer():find("stage", 1, true), "log action list advertised mutations")
+local log_window = vim.api.nvim_get_current_win()
 press("g?")
-assert(notifications[#notifications]:find("<CR> open commit", 1, true))
-assert(not notifications[#notifications]:find("stage", 1, true), "log help advertised mutations")
+assert(vim.bo.buftype == "help", "g? on log should open Neovim help")
+assert(vim.api.nvim_get_current_line():find("*currantgit-log*", 1, true), "g? on log should land on currantgit-log")
+vim.cmd("helpclose")
+assert(vim.api.nvim_get_current_win() == log_window)
 vim.api.nvim_win_set_cursor(0, { 1, 0 })
 vim.api.nvim_exec_autocmds("CursorMoved", { buffer = buffer })
-assert(not vim.api.nvim_buf_get_lines(0, -2, -1, false)[1]:find("<CR>", 1, true))
+assert(not footer():find("<CR>", 1, true), "header row should not offer open commit")
 press("<CR>")
 assert(vim.b.currantgit_title == "log", "header must not open a commit")
-press("g?")
-assert(not notifications[#notifications]:find("<CR>", 1, true))
-vim.notify = notify
 
 -- Native search/yank and mapped opening operate on the same semantic row.
 vim.cmd("normal! gg")
@@ -145,7 +146,8 @@ assert(not currantgit.which_key()["<CR>"], "empty log must not advertise opening
 
 -- Git errors retain the last good projection; custom formatting stays raw.
 open()
-notifications = {}
+local notifications = {}
+local notify = vim.notify
 vim.notify = function(message) notifications[#notifications + 1] = message end
 local old_lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
 vim.cmd("Git log currantgit-missing-revision")
