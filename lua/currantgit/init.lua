@@ -27,7 +27,7 @@ local open_diff_args
 local set_buffer
 local attach_diff
 local attach_log
-local toggle_status_help
+local open_help
 
 local status_namespace = vim.api.nvim_create_namespace("currantgit_status")
 
@@ -43,7 +43,6 @@ local function define_highlights()
     CurrantGitStatusRenamed = "Special",
     CurrantGitStatusUntracked = "Comment",
     CurrantGitPath = "Normal",
-    CurrantGitAction = "SpecialKey",
     CurrantGitHelpHeading = "Title",
     CurrantGitHelpKey = "SpecialKey",
     CurrantGitHelpDescription = "Comment",
@@ -217,49 +216,31 @@ local function update_discovery(buffer)
   end
   local item = current_item(buffer)
   local available = actions.discovery(item, { buffer = buffer })
-  local labels = {}
-  for _, action in ipairs(available) do
-    if action.key then
-      labels[#labels + 1] = action.key .. " " .. action.label
-    end
-  end
-  local discovery = #labels > 0 and "Actions: " .. table.concat(labels, "   ") or "Actions: r refresh   g? help"
   local footer_start = vim.b[buffer].currantgit_footer_start
   if type(footer_start) ~= "number" then
     footer_start = vim.api.nvim_buf_line_count(buffer)
     vim.b[buffer].currantgit_footer_start = footer_start
   end
-  local lines = { discovery }
+  local key_width = 0
+  for _, action in ipairs(available) do
+    key_width = math.max(key_width, vim.fn.strdisplaywidth(action.key))
+  end
+  local lines = { "Available actions" }
   local highlights = {
-    { line = footer_start, start_col = 0, end_col = #discovery, group = "CurrantGitAction" },
+    { line = footer_start, start_col = 0, end_col = #lines[1], group = "CurrantGitHelpHeading" },
   }
-  if vim.b[buffer].currantgit_help_open then
-    lines[#lines + 1] = ""
-    lines[#lines + 1] = "Available actions"
+  for _, action in ipairs(available) do
+    local padding = string.rep(" ", key_width - vim.fn.strdisplaywidth(action.key) + 3)
+    local help_line = action.key .. padding .. action.desc
+    lines[#lines + 1] = help_line
+    local line = footer_start + #lines - 1
+    highlights[#highlights + 1] = { line = line, start_col = 0, end_col = #action.key, group = "CurrantGitHelpKey" }
     highlights[#highlights + 1] = {
-      line = footer_start + #lines - 1,
-      start_col = 0,
-      end_col = #lines[#lines],
-      group = "CurrantGitHelpHeading",
+      line = line,
+      start_col = #action.key + #padding,
+      end_col = #help_line,
+      group = "CurrantGitHelpDescription",
     }
-    for _, action in ipairs(available) do
-      if action.key then
-        local help_line = action.key .. "   " .. action.desc
-        lines[#lines + 1] = help_line
-        highlights[#highlights + 1] = {
-          line = footer_start + #lines - 1,
-          start_col = 0,
-          end_col = #action.key,
-          group = "CurrantGitHelpKey",
-        }
-        highlights[#highlights + 1] = {
-          line = footer_start + #lines - 1,
-          start_col = #action.key + 3,
-          end_col = #help_line,
-          group = "CurrantGitHelpDescription",
-        }
-      end
-    end
   end
   local line_count = vim.api.nvim_buf_line_count(buffer)
   set_modifiable(buffer, function()
@@ -275,13 +256,26 @@ local function update_discovery(buffer)
   apply_status_highlights(buffer, highlights, footer_start - 1)
 end
 
-toggle_status_help = function(buffer)
-  if not vim.api.nvim_buf_is_valid(buffer) or vim.b[buffer].currantgit_title ~= "status" then
-    return false
+local HELP_TAGS = {
+  status = "currantgit-status",
+  log = "currantgit-log",
+}
+
+-- Opens this surface's section of doc/currantgit.txt. Plugin managers
+-- normally generate doc/tags; when nothing has (a bare `rtp` checkout),
+-- generate them once for CurrantGit's own doc directory and retry rather
+-- than failing with E149.
+open_help = function(buffer)
+  local tag = HELP_TAGS[vim.b[buffer].currantgit_title] or "currantgit.txt"
+  if pcall(vim.cmd.help, tag) then return end
+  local doc = vim.api.nvim_get_runtime_file("doc/currantgit.txt", false)[1]
+  if doc then
+    pcall(vim.cmd.helptags, vim.fn.fnameescape(vim.fn.fnamemodify(doc, ":h")))
   end
-  vim.b[buffer].currantgit_help_open = not vim.b[buffer].currantgit_help_open
-  update_discovery(buffer)
-  return true
+  local ok, error_message = pcall(vim.cmd.help, tag)
+  if not ok then
+    vim.notify("CurrantGit: " .. tostring(error_message), vim.log.levels.ERROR)
+  end
 end
 
 local function action_context(buffer)
@@ -329,17 +323,8 @@ local function action_context(buffer)
     buffer = buffer,
     root = root,
     refresh = refresh,
-    help = function(item)
-      if toggle_status_help(buffer) then return end
-      -- Pass the full context (not just `buffer`) so this fallback matches
-      -- what actions.discovery receives everywhere else the action
-      -- registry is consulted, in case an is_available predicate ever
-      -- inspects context fields beyond `buffer`.
-      local labels = {}
-      for _, available_action in ipairs(actions.discovery(item, context)) do
-        labels[#labels + 1] = available_action.key .. " " .. available_action.label
-      end
-      vim.notify("CurrantGit: " .. table.concat(labels, "   "), vim.log.levels.INFO)
+    help = function()
+      open_help(buffer)
     end,
     open = function(item)
       navigation.update(0)
@@ -568,10 +553,10 @@ local function attach_status(buffer)
     group = group,
     buffer = buffer,
     callback = function()
-      -- Skip while the cursor is inside the footer/help region itself: it
-      -- has no line item, so recomputing discovery there would collapse
-      -- open inline help (whose text the user may be reading or yanking)
-      -- back down to the single default line out from under the cursor.
+      -- Skip while the cursor is inside the action list itself: it has no
+      -- line item, so recomputing there would shrink the list to the
+      -- item-less actions out from under the cursor while the user is
+      -- reading or yanking it.
       local footer_start = vim.b[buffer].currantgit_footer_start
       local cursor_line = vim.api.nvim_win_get_cursor(0)[1]
       if type(footer_start) == "number" and cursor_line >= footer_start then
@@ -663,11 +648,6 @@ set_buffer = function(lines, items, title, line_items, root, fold_levels, highli
     vim.b[buffer].currantgit_footer_start = #lines
   end
   if title == "status" then
-    -- Preserve an already-open help panel across a reused buffer's refresh
-    -- (`r`, stage/unstage/discard, ...): defaulting unconditionally to
-    -- false here closes help on every refresh, contradicting the
-    -- documented "pressing g? again removes it" toggle contract.
-    vim.b[buffer].currantgit_help_open = vim.b[buffer].currantgit_help_open or false
     vim.b[buffer].currantgit_status_highlights = highlights or {}
     apply_status_highlights(buffer, highlights)
     vim.b[buffer].currantgit_item_sections = (status_extra and status_extra.item_sections) or {}

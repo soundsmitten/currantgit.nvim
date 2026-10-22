@@ -3,13 +3,13 @@
 ===============================================================================
 CONTENTS                                                     *currantgit-contents*
 
-COMMANDS                                                        |:Git|
-STATUS                                                   *currantgit-status*
-LOG                                                         |currantgit-log|
-CONFIGURATION                                       *currantgit-configuration*
-NAVIGATION                                           *currantgit-navigation*
-ACTIONS                                                     *currantgit-actions*
-RPC                                                            *currantgit-rpc*
+COMMANDS                                                |currantgit-commands|
+STATUS                                                    |currantgit-status|
+LOG                                                          |currantgit-log|
+CONFIGURATION                                      |currantgit-configuration|
+NAVIGATION                                            |currantgit-navigation|
+ACTIONS                                                  |currantgit-actions|
+RPC                                                          *currantgit-rpc*
 
 ===============================================================================
 COMMANDS                                                        *currantgit-commands*
@@ -61,7 +61,7 @@ u                       Unstage the file.
 -                       Toggle the file's staged state.
 X                       Discard working-tree changes after confirmation.
 r                       Refresh the status surface.
-g?                      Toggle available status actions as inline buffer text.
+g?                      Open this help section.
 =                       On a staged or unstaged change item, toggle that
                         file's diff inline beneath the row: index-vs-HEAD for
                         a staged item, worktree-vs-index for an unstaged one.
@@ -77,8 +77,11 @@ g?                      Toggle available status actions as inline buffer text.
                         survives a refresh for changes that still exist and
                         is dropped for changes that no longer do.
 
-The discovery line is generated from the same action metadata as the mappings.
-It is a hint, not a second keymap definition.
+Below the status body, an "Available actions" list shows the keys that apply
+to the item under the cursor. It is generated from the same action metadata
+as the mappings, so it is a hint, not a second keymap definition. It is
+ordinary read-only buffer text: it can be searched and yanked, sits outside
+the status folds, and is not rewritten while the cursor is inside it.
 
 Integrations can use `require('currantgit').discovery()` for structured
 `id`, `key`, `label`, and `desc` entries, or
@@ -99,14 +102,9 @@ CurrantGitStatusModified    Modified markers (DiffChange)
 CurrantGitStatusRenamed     Renamed/copied markers (Special)
 CurrantGitStatusUntracked   Untracked markers (Comment)
 CurrantGitPath              Repository-relative paths (Normal)
-CurrantGitAction            Compact discovery line (SpecialKey)
-CurrantGitHelpHeading       Inline-help heading (Title)
-CurrantGitHelpKey           Inline-help keys (SpecialKey)
-CurrantGitHelpDescription   Inline-help descriptions (Comment)
-
-The inline help is ordinary read-only buffer content derived from the same
-contextual action registry as the mappings and compact discovery line. It can
-be searched and yanked; pressing g? again removes it.
+CurrantGitHelpHeading       "Available actions" heading (Title)
+CurrantGitHelpKey           Action keys (SpecialKey)
+CurrantGitHelpDescription   Action descriptions (Comment)
 
 The diff action opens a read-only diff surface. Hunk headers are native fold
 roots, so |fold-commands| can collapse or reopen each hunk.
@@ -145,11 +143,11 @@ the visible rows to those items. Rendered text is never an action target.
                         shared commit view (action ID: `commit.open`).
 r                       Refresh this log with its original arguments and
                         repository. Retain the selected commit when present.
-g?                      Show actions available at the cursor.
+g?                      Open this help section.
 
 Ctrl-O returns from a commit to the log and restores the cursor. Ctrl-Shift-I
-moves forward again. The discovery line, public discovery()/which_key()
-projections, and g? use the action registry. Headers and empty results have no
+moves forward again. The "Available actions" list and the public
+discovery()/which_key() projections use the action registry. Headers and empty results have no
 commit action. Log actions do not stage, reset, or otherwise mutate Git state.
 
 The default limit is 50 commits. Selection arguments supported by this surface:
