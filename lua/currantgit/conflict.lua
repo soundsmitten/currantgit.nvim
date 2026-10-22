@@ -14,24 +14,57 @@ local M = {}
 local deps = {}
 local namespace = vim.api.nvim_create_namespace("currantgit_conflict")
 
--- Every color links to a diff group by default, so the resolver follows the
--- colorscheme; users override these names before setup to restyle it.
-local HIGHLIGHTS = {
-  CurrantGitConflictOurs = "DiffAdd",
-  CurrantGitConflictOursText = "DiffText",
-  CurrantGitConflictTheirs = "DiffChange",
-  CurrantGitConflictTheirsText = "DiffText",
-  CurrantGitConflictBase = "Comment",
-  CurrantGitConflictMarker = "NonText",
-  CurrantGitConflictLabel = "Special",
-  CurrantGitConflictFiller = "NonText",
-}
+local function hl_color(name, key)
+  return vim.api.nvim_get_hl(0, { name = name, link = false })[key]
+end
+
+-- Mixes two 0xRRGGBB colors: `alpha` of `a` over `b`.
+local function blend(a, b, alpha)
+  local result = 0
+  for shift = 0, 16, 8 do
+    local x, y = bit.band(bit.rshift(a, shift), 0xff), bit.band(bit.rshift(b, shift), 0xff)
+    result = result + bit.lshift(math.floor(x * alpha + y * (1 - alpha) + 0.5), shift)
+  end
+  return result
+end
+
+-- Ours and theirs get their own tints, mixed from the colorscheme's info
+-- (cool) and warning (warm) colors over its background, so they stay apart
+-- even where DiffAdd and DiffChange look alike. Everything is `default`, so
+-- a user's own definition of any of these groups wins.
+local function define_highlights()
+  local light = vim.o.background == "light"
+  local bg = hl_color("Normal", "bg") or (light and 0xffffff or 0x1c1c1c)
+  local fg = hl_color("Normal", "fg") or (light and 0x1c1c1c or 0xd0d0d0)
+  local cool = hl_color("DiagnosticInfo", "fg") or hl_color("Function", "fg") or 0x5f87d7
+  local warm = hl_color("DiagnosticWarn", "fg") or hl_color("Constant", "fg") or 0xd7875f
+  local comment = hl_color("Comment", "fg") or blend(fg, bg, 0.5)
+  local groups = {
+    CurrantGitConflictOurs = { bg = blend(cool, bg, 0.2) },
+    CurrantGitConflictOursText = { bg = blend(cool, bg, 0.38) },
+    CurrantGitConflictOursLabel = { fg = cool },
+    CurrantGitConflictTheirs = { bg = blend(warm, bg, 0.2) },
+    CurrantGitConflictTheirsText = { bg = blend(warm, bg, 0.38) },
+    CurrantGitConflictTheirsLabel = { fg = warm },
+    CurrantGitConflictBase = { fg = comment, italic = true },
+    CurrantGitConflictBaseLabel = { fg = comment },
+    CurrantGitConflictMarker = { fg = blend(fg, bg, 0.4) },
+    CurrantGitConflictFiller = { fg = blend(fg, bg, 0.16) },
+    CurrantGitConflictResult = {},
+  }
+  for name, spec in pairs(groups) do
+    spec.default = true
+    vim.api.nvim_set_hl(0, name, spec)
+  end
+end
 
 -- In diff mode DiffDelete only paints filler; in a conflict the gap means
 -- "the other side has lines here", not "deleted", so it gets a neutral color.
 local FILLER_HIGHLIGHT = "DiffDelete:CurrantGitConflictFiller"
 local SIDE_HIGHLIGHT = {
-  result = FILLER_HIGHLIGHT,
+  -- The result pane is colored only by CurrantGit's region marks.
+  result = "DiffAdd:CurrantGitConflictResult,DiffChange:CurrantGitConflictResult,"
+    .. "DiffText:CurrantGitConflictResult," .. FILLER_HIGHLIGHT,
   ours = "DiffAdd:CurrantGitConflictOurs,DiffChange:CurrantGitConflictOurs,DiffText:CurrantGitConflictOursText,"
     .. FILLER_HIGHLIGHT,
   theirs = "DiffAdd:CurrantGitConflictTheirs,DiffChange:CurrantGitConflictTheirs,"
@@ -355,10 +388,10 @@ local function decorate(buffer)
   vim.api.nvim_buf_clear_namespace(buffer, namespace, 0, -1)
   local item = vim.b[buffer].currantgit_conflict
   local live = M.parse_markers(vim.api.nvim_buf_get_lines(buffer, 0, -1, false))
-  local function line(row, group, text)
+  local function line(row, group, text, label_group)
     vim.api.nvim_buf_set_extmark(buffer, namespace, row - 1, 0, {
       line_hl_group = group,
-      virt_text = text and { { text, "CurrantGitConflictLabel" } } or nil,
+      virt_text = text and { { text, label_group } } or nil,
       virt_text_pos = text and "eol" or nil,
       priority = 4200,
     })
@@ -368,16 +401,21 @@ local function decorate(buffer)
   end
   for _, region in ipairs(live) do
     local ours_end = (region.base_marker or region.separator) - 1
-    line(region.start, "CurrantGitConflictMarker", "  ours" .. (region.ours_label and " · " .. region.ours_label or ""))
+    line(region.start, "CurrantGitConflictMarker", "  ours", "CurrantGitConflictOursLabel")
     span(region.start + 1, ours_end, "CurrantGitConflictOurs")
     if region.base_marker then
-      line(region.base_marker, "CurrantGitConflictMarker", "  base")
-      span(region.base_marker + 1, region.separator - 1, "CurrantGitConflictBase")
+      line(region.base_marker, "CurrantGitConflictMarker", "  base", "CurrantGitConflictBaseLabel")
+      -- A text highlight, not a line one: it has to beat the line colors.
+      for row = region.base_marker + 1, region.separator - 1 do
+        local text = vim.api.nvim_buf_get_lines(buffer, row - 1, row, false)[1] or ""
+        vim.api.nvim_buf_set_extmark(buffer, namespace, row - 1, 0, {
+          end_col = #text, hl_group = "CurrantGitConflictBase", priority = 4300,
+        })
+      end
     end
     line(region.separator, "CurrantGitConflictMarker")
     span(region.separator + 1, region.finish - 1, "CurrantGitConflictTheirs")
-    line(region.finish, "CurrantGitConflictMarker",
-      "  theirs" .. (region.theirs_label and " · " .. region.theirs_label or ""))
+    line(region.finish, "CurrantGitConflictMarker", "  theirs", "CurrantGitConflictTheirsLabel")
   end
   local window = vim.fn.bufwinid(buffer)
   if window ~= -1 and item then
@@ -562,9 +600,11 @@ end
 -- `options.dispatch(buffer, id)` routes pane mappings back through actions.
 function M.setup(options)
   deps = options
-  for name, link in pairs(HIGHLIGHTS) do
-    vim.api.nvim_set_hl(0, name, { link = link, default = true })
-  end
+  define_highlights()
+  vim.api.nvim_create_autocmd("ColorScheme", {
+    group = vim.api.nvim_create_augroup("CurrantGitConflictColors", { clear = true }),
+    callback = define_highlights,
+  })
 end
 
 function M.register(actions, open)

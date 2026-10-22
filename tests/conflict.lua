@@ -302,11 +302,19 @@ local function test_resolver_interactions()
   local groups, labels = {}, {}
   for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(panes.result, namespace, 0, -1, { details = true })) do
     if mark[4].line_hl_group then groups[mark[4].line_hl_group] = true end
-    for _, chunk in ipairs(mark[4].virt_text or {}) do labels[#labels + 1] = chunk[1] end
+    if mark[4].hl_group then groups[mark[4].hl_group] = true end
+    for _, chunk in ipairs(mark[4].virt_text or {}) do labels[vim.trim(chunk[1])] = true end
   end
   assert(groups.CurrantGitConflictOurs and groups.CurrantGitConflictTheirs and groups.CurrantGitConflictBase)
   assert(groups.CurrantGitConflictMarker)
-  assert(table.concat(labels, " "):find("ours", 1, true) and table.concat(labels, " "):find("theirs", 1, true))
+  assert(labels.ours and labels.theirs and labels.base and not labels["ours · HEAD"],
+    "labels should not repeat the marker's own branch name")
+  -- Only CurrantGit's own marks color the result pane, so the sides can't be
+  -- washed out by the colorscheme's diff colors.
+  assert(vim.wo[windows[2]].winhighlight:find("DiffAdd:CurrantGitConflictResult", 1, true))
+  local ours_hl = vim.api.nvim_get_hl(0, { name = "CurrantGitConflictOurs", link = false })
+  local theirs_hl = vim.api.nvim_get_hl(0, { name = "CurrantGitConflictTheirs", link = false })
+  assert(ours_hl.bg and theirs_hl.bg and ours_hl.bg ~= theirs_hl.bg, "ours and theirs need distinct tints")
   local first_region = conflict.parse_markers(vim.api.nvim_buf_get_lines(panes.result, 0, -1, false))[1]
   local saved = vim.api.nvim_buf_get_lines(panes.result, 0, -1, false)
   vim.api.nvim_buf_set_lines(panes.result, first_region.start - 1, first_region.finish, false, { "picked" })

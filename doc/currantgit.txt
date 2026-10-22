@@ -178,17 +178,22 @@ result's conflict blocks, filler lines are hatched (`diff:╱` in
 and the result winbar shows "n of m resolved" as you edit. Word-level
 highlights come from your 'diffopt' (`inline:word` or `inline:char`);
 CurrantGit does not change that global option. Override these groups to
-restyle it (defaults link to diff groups, so the colorscheme applies):
+restyle it. The tints are mixed from your colorscheme's DiagnosticInfo
+(cool) and DiagnosticWarn (warm) colors over Normal, and recomputed on
+|ColorScheme|:
 
-CurrantGitConflictOurs        Ours lines (DiffAdd)
-CurrantGitConflictOursText    Changed text on ours lines (DiffText)
-CurrantGitConflictTheirs      Theirs lines (DiffChange)
-CurrantGitConflictTheirsText  Changed text on theirs lines (DiffText)
-CurrantGitConflictBase        Base lines in diff3/zdiff3 blocks (Comment)
-CurrantGitConflictMarker      Marker lines (NonText)
-CurrantGitConflictLabel       Marker labels (Special)
-CurrantGitConflictFiller      Hatched filler lines (NonText), instead of the
-                              usual DiffDelete red
+CurrantGitConflictOurs          Ours lines (cool tint)
+CurrantGitConflictOursText      Changed text on ours lines
+CurrantGitConflictOursLabel     The "ours" marker label
+CurrantGitConflictTheirs        Theirs lines (warm tint)
+CurrantGitConflictTheirsText    Changed text on theirs lines
+CurrantGitConflictTheirsLabel   The "theirs" marker label
+CurrantGitConflictBase          Base text in diff3/zdiff3 blocks (dimmed)
+CurrantGitConflictBaseLabel     The "base" marker label
+CurrantGitConflictMarker        Marker lines (dimmed, still real text)
+CurrantGitConflictFiller        Hatched filler (faint, instead of DiffDelete)
+CurrantGitConflictResult        Diff colors in the result pane (none, so
+                                only the region tints show)
 
 Markers are assumed to be the default 7 characters; a custom
 `conflict-marker-size` attribute is not read yet.
