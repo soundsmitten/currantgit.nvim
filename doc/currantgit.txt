@@ -106,6 +106,23 @@ CurrantGitHelpHeading       "Available actions" heading (Comment)
 CurrantGitHelpKey           Action keys (SpecialKey)
 CurrantGitHelpDescription   Action descriptions (Comment)
 
+Diff text is syntax highlighted in the changed file's own language wherever
+CurrantGit shows it: the diff surface, inline `=` diffs in status, and the
+commit view. Each hunk's old and new sides are parsed separately with the
+file's treesitter parser, so multi-line strings and comments parse as they do
+in the file. Added and removed rows get line backgrounds. Files with no
+installed treesitter parser keep the backgrounds without token colours.
+Regions over 5000 lines skip token highlighting. On the diff surface these
+highlights replace the regex `diff` syntax ('syntax' is OFF); the filetype
+stays `diff`.
+
+CurrantGitDiffAdd           Added rows (DiffAdd)
+CurrantGitDiffDelete        Removed rows (DiffDelete)
+CurrantGitDiffAddSign       The `+` prefix (Added)
+CurrantGitDiffDeleteSign    The `-` prefix (Removed)
+CurrantGitDiffHunk          `@@` hunk headers (Statement)
+CurrantGitDiffHeader        `diff --git`/`index`/`---`/`+++` lines (Comment)
+
 The diff action opens a read-only diff surface. Hunk headers are native fold
 roots, so |fold-commands| can collapse or reopen each hunk.
 Each hunk is also a stable semantic item with source ranges and collapse,
