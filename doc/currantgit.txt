@@ -103,6 +103,13 @@ CurrantGitAction            Compact discovery line (SpecialKey)
 CurrantGitHelpHeading       Inline-help heading (Title)
 CurrantGitHelpKey           Inline-help keys (SpecialKey)
 CurrantGitHelpDescription   Inline-help descriptions (Comment)
+CurrantGitActivitySuccess   Activity success marker (DiagnosticOk)
+CurrantGitActivityFailure   Activity failure marker and exit code (DiagnosticError)
+CurrantGitActivityTime      Activity timestamps (Comment)
+CurrantGitActivityDuration  Activity durations (Number)
+CurrantGitActivityCommand   Activity argv (Statement)
+CurrantGitActivityOutput    Folded command output (Comment)
+CurrantGitActivityStderr    Failed commands' stderr (DiagnosticWarn)
 
 The inline help is ordinary read-only buffer content derived from the same
 contextual action registry as the mappings and compact discovery line. It can
@@ -127,9 +134,20 @@ buffer remains available beside the read-only attribution buffer. `gq` closes
 the blame companion and returns to the source buffer. `<CR>` on an attribution
 row opens its commit view; Ctrl-O returns to blame.
 
-`:GitActivity` shows the bounded command ledger: argv, duration, exit code,
-and summarized output. It is an inspection surface, not a replacement for
-the status projection.
+`:GitActivity` shows the bounded command ledger, newest first. Each row is
+one Git command: a ✓/✗ status marker, the local HH:MM:SS start time, the
+duration, and argv without the leading `git`. Failed rows end in `exit N`.
+A repository path heading appears whenever the working directory changes
+from the previous row. Command output sits in a native fold under its row,
+closed by default; failed commands start expanded so their stderr is
+visible. NUL separators from `-z` commands render as line breaks and other
+control bytes as `<xx>`, so the buffer never contains raw control bytes.
+
+Each row is an `activity:<n>` item in `b:currantgit_line_items`, where `n`
+is the command's position in the ledger. `<CR>` or `=` toggles the row's
+output (ordinary `zo`/`zc` work too), `r` refreshes, and `g?` shows the
+available actions. It is an inspection surface, not a replacement for the
+status projection.
 
 ===============================================================================
 LOG                                                             *currantgit-log*

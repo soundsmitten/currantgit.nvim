@@ -1,6 +1,7 @@
 local M = {}
 local config = require("currantgit.config")
 local actions = require("currantgit.actions")
+local activity = require("currantgit.activity")
 local blame = require("currantgit.blame")
 local diff = require("currantgit.diff")
 local git_log = require("currantgit.log")
@@ -28,6 +29,7 @@ local set_buffer
 local attach_diff
 local attach_log
 local toggle_status_help
+local attach_activity
 
 local status_namespace = vim.api.nvim_create_namespace("currantgit_status")
 
@@ -47,6 +49,13 @@ local function define_highlights()
     CurrantGitHelpHeading = "Title",
     CurrantGitHelpKey = "SpecialKey",
     CurrantGitHelpDescription = "Comment",
+    CurrantGitActivitySuccess = "DiagnosticOk",
+    CurrantGitActivityFailure = "DiagnosticError",
+    CurrantGitActivityTime = "Comment",
+    CurrantGitActivityDuration = "Number",
+    CurrantGitActivityCommand = "Statement",
+    CurrantGitActivityOutput = "Comment",
+    CurrantGitActivityStderr = "DiagnosticWarn",
   }
   for group, target in pairs(links) do
     vim.api.nvim_set_hl(0, group, { default = true, link = target })
@@ -83,7 +92,10 @@ local function record_command(args, cwd, result, started)
     cwd = cwd,
     code = result.code,
     duration_ms = math.floor((vim.loop.hrtime() - started) / 1000000),
+    time = os.time(),
     output = output:sub(1, 2000),
+    stdout = (result.stdout or ""):sub(1, 2000),
+    stderr = (result.stderr or ""):sub(1, 2000),
   }
 end
 
@@ -276,7 +288,8 @@ local function update_discovery(buffer)
 end
 
 toggle_status_help = function(buffer)
-  if not vim.api.nvim_buf_is_valid(buffer) or vim.b[buffer].currantgit_title ~= "status" then
+  local title = vim.api.nvim_buf_is_valid(buffer) and vim.b[buffer].currantgit_title
+  if title ~= "status" and title ~= "activity" then
     return false
   end
   vim.b[buffer].currantgit_help_open = not vim.b[buffer].currantgit_help_open
@@ -320,6 +333,8 @@ local function action_context(buffer)
   local function refresh()
     if vim.b[buffer].currantgit_title == "log" then
       open_log(vim.b[buffer].currantgit_log_args, root)
+    elseif vim.b[buffer].currantgit_title == "activity" then
+      open_activity()
     else
       open_status(root)
     end
@@ -659,7 +674,7 @@ set_buffer = function(lines, items, title, line_items, root, fold_levels, highli
   vim.b[buffer].currantgit_fold_levels = fold_levels or {}
   vim.b[buffer].currantgit_root = root
   vim.b[buffer].currantgit_title = title
-  if title == "status" or title == "log" then
+  if title == "status" or title == "log" or title == "activity" then
     vim.b[buffer].currantgit_footer_start = #lines
   end
   if title == "status" then
@@ -676,8 +691,12 @@ set_buffer = function(lines, items, title, line_items, root, fold_levels, highli
     end
     vim.b[buffer].currantgit_expanded = (status_extra and status_extra.expanded) or {}
   end
-  vim.wo.foldmethod = (title == "status" or title == "diff") and "expr" or "manual"
-  if title == "status" or title == "diff" then
+  local expr_folds = title == "status" or title == "diff" or title == "activity"
+  vim.wo.foldmethod = expr_folds and "expr" or "manual"
+  -- Activity rows are their own fold heading: an empty 'foldtext' shows the
+  -- row itself (with highlights) instead of "+-- N lines".
+  vim.wo.foldtext = title == "activity" and "" or "foldtext()"
+  if expr_folds then
     vim.wo.foldexpr = "v:lua.require'currantgit'.foldexpr(v:lnum)"
     vim.wo.foldlevel = 99
     vim.wo.foldenable = true
@@ -688,6 +707,8 @@ set_buffer = function(lines, items, title, line_items, root, fold_levels, highli
     attach_diff(buffer)
   elseif title == "log" then
     attach_log(buffer)
+  elseif title == "activity" then
+    attach_activity(buffer)
   end
   return buffer
 end
@@ -1273,29 +1294,55 @@ local function run_git(args, mods)
   end)
 end
 
-open_activity = function()
-  local lines = { "CurrantGit activity", "" }
-  if #state.command_log == 0 then
-    lines[#lines + 1] = "  no Git commands recorded"
-  else
-    for index, entry in ipairs(state.command_log) do
-      lines[#lines + 1] = string.format(
-        "%3d  %4dms  [%d]  %s",
-        index,
-        entry.duration_ms,
-        entry.code,
-        table.concat(entry.argv, " ")
-      )
-      if entry.output ~= "" then
-        for output_line in (entry.output .. "\n"):gmatch("(.-)\n") do
-          lines[#lines + 1] = "      " .. output_line
-        end
-      end
+local function toggle_activity_output(buffer, item)
+  local window = vim.fn.bufwinid(buffer)
+  if window == -1 then return end
+  local line = vim.api.nvim_win_get_cursor(window)[1]
+  if not item.has_output or vim.fn.foldlevel(line) == 0 then return end
+  local open = vim.b[buffer].currantgit_activity_open or {}
+  vim.api.nvim_win_call(window, function()
+    if vim.fn.foldclosed(line) ~= -1 then
+      vim.cmd(line .. "foldopen")
+      open[item.id] = true
+    else
+      vim.cmd(line .. "foldclose")
+      open[item.id] = false
     end
+  end)
+  vim.b[buffer].currantgit_activity_open = open
+end
+
+attach_activity = function(buffer)
+  local map = function(lhs, id, desc)
+    vim.keymap.set("n", lhs, function() dispatch_current(buffer, id) end, {
+      buffer = buffer, silent = true, desc = desc,
+    })
   end
+  map("<CR>", "activity.toggle_output", "Toggle command output")
+  map("=", "activity.toggle_output", "Toggle command output")
+  map("r", "surface.refresh", "Refresh activity")
+  map("g?", "surface.help", "Activity help")
+  local group = vim.api.nvim_create_augroup("CurrantGitActivity" .. buffer, { clear = true })
+  vim.api.nvim_create_autocmd("CursorMoved", {
+    group = group, buffer = buffer,
+    callback = function() update_discovery(buffer) end,
+  })
+end
+
+open_activity = function()
+  local existing = vim.fn.bufnr("currantgit://activity")
+  local open = existing >= 0 and vim.b[existing].currantgit_activity_open or {}
+  local lines, fold_levels, line_items, highlights, folds = activity.render(state.command_log, open)
   navigation.update(0)
-  set_buffer(lines, {}, "activity", {}, vim.fn.getcwd())
-  vim.b.currantgit_command_log = state.command_log
+  local buffer = set_buffer(lines, {}, "activity", line_items, vim.fn.getcwd(), fold_levels)
+  vim.b[buffer].currantgit_command_log = state.command_log
+  vim.b[buffer].currantgit_activity_open = open
+  apply_status_highlights(buffer, highlights)
+  vim.wo.foldlevel = 0
+  for _, fold in ipairs(folds) do
+    if fold.open then vim.cmd(fold.line .. "foldopen") end
+  end
+  update_discovery(buffer)
   navigation.visit(0)
 end
 
@@ -1466,6 +1513,17 @@ function M.setup(opts)
     end,
     run = function(context, item)
       context.unstage_hunk(item)
+      return true
+    end,
+  })
+  actions.register({
+    id = "activity.toggle_output",
+    label = "output",
+    desc = "Show or hide this command's output",
+    key = "=",
+    applies_to = { "activity" },
+    run = function(context, item)
+      toggle_activity_output(context.buffer, item)
       return true
     end,
   })
