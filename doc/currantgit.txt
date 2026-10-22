@@ -76,7 +76,29 @@ g?                      Toggle available status actions as inline buffer text.
                         searched, yanked, and its own hunks are native folds
                         nested inside the section's fold. Expansion state
                         survives a refresh for changes that still exist and
-                        is dropped for changes that no longer do.
+                        is dropped for changes that no longer do. Inside an
+                        inline diff, `s` and `u` act on the hunk under the
+                        cursor (as in the diff surface) and refresh status.
+
+Visual mode (|linewise| or characterwise) applies `s`, `u`, `-` and `X` to
+every unique item on the selected lines:
+
+{Visual}s               Stage every selected file in one `git add`, or every
+                        selected unstaged inline hunk as one patch.
+{Visual}u               Unstage every selected file in one
+                        `git restore --staged`, or every selected staged
+                        inline hunk as one reverse patch.
+{Visual}-               Toggle each selected file, as `-` does: files with
+                        staged changes unstage, the rest stage (at most one
+                        unstage call, then one stage call).
+{Visual}X               Discard every selected file's working-tree changes
+                        after a single confirmation listing every file.
+
+Each file is passed as its own `:(literal)` pathspec. Items an action does not
+apply to (e.g. an already fully staged file under `s`) are skipped and named in
+a warning. A selection that mixes file rows and hunks is refused rather than
+guessed at. If Git rejects a batch (for example, a selected file vanished since
+the last refresh), nothing in that batch is applied.
 
 The discovery line is generated from the same action metadata as the mappings.
 It is a hint, not a second keymap definition.
@@ -122,7 +144,9 @@ Each hunk is also a stable semantic item with source ranges and collapse,
 stage, and unstage capabilities. On a working diff, `s` stages the current
 hunk. On a staged diff, `u` unstages the current hunk. These actions send the
 exact hunk patch to Git through stdin; they do not construct shell commands
-from rendered text. A successful mutation refreshes the same diff projection.
+from rendered text. In visual mode, `s` and `u` apply every selected hunk
+(across files) as a single patch, so Git applies all of them or none.
+A successful mutation refreshes the same diff projection.
 If Git rejects the patch, CurrantGit reports the failure and leaves the
 projection and repository state untouched.
 

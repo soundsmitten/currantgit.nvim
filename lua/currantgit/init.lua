@@ -26,6 +26,7 @@ local open_activity
 local open_commit
 local open_log
 local open_diff_args
+local combined_hunk_patch
 local set_buffer
 local attach_diff
 local attach_log
@@ -298,6 +299,49 @@ toggle_status_help = function(buffer)
   return true
 end
 
+local function literal_pathspecs(paths)
+  local pathspecs = {}
+  for index, path in ipairs(paths) do pathspecs[index] = ":(literal)" .. path end
+  return pathspecs
+end
+
+-- Joins hunks into one patch with each file's header emitted once and its
+-- hunks in ascending pre-image order -- exactly the shape `git diff` itself
+-- emits, so every hunk's line numbers refer to the same pre-image. Repeating
+-- the header per hunk also applied correctly in testing (Git re-anchors each
+-- section against the already-patched file), but that is not the shape the
+-- hunks were generated in, so it isn't relied on.
+combined_hunk_patch = function(hunks)
+  local by_header, header_order = {}, {}
+  for _, hunk in ipairs(hunks) do
+    if type(hunk.patch) ~= "string" or hunk.patch == "" or type(hunk.header_lines) ~= "table" then
+      return nil, "hunk has no applyable patch"
+    end
+    local header = table.concat(hunk.header_lines, "\n")
+    if not by_header[header] then
+      by_header[header] = {}
+      header_order[#header_order + 1] = header
+    end
+    table.insert(by_header[header], hunk)
+  end
+  local lines = {}
+  for _, header in ipairs(header_order) do
+    lines[#lines + 1] = header
+    table.sort(by_header[header], function(a, b) return a.old_start < b.old_start end)
+    for _, hunk in ipairs(by_header[header]) do
+      local body = vim.split(hunk.patch, "\n", { plain = true })
+      -- diff.parse leaves trailing empty strings (the patch's final
+      -- newline, and the last hunk's buffer padding). A bare empty line
+      -- mid-patch would be read as an empty context line, so drop them;
+      -- real context lines always carry their leading space.
+      local last = #body
+      while last > #hunk.header_lines and body[last] == "" do last = last - 1 end
+      for index = #hunk.header_lines + 1, last do lines[#lines + 1] = body[index] end
+    end
+  end
+  return table.concat(lines, "\n") .. "\n"
+end
+
 local function action_context(buffer)
   local root = vim.b[buffer].currantgit_root
   local function action(args, callback, input)
@@ -330,6 +374,15 @@ local function action_context(buffer)
       return
     end
     action(args, callback, item.patch)
+  end
+  -- Hunks live in a diff surface or in a status buffer's inline `=` diffs;
+  -- re-render whichever surface the hunk came from.
+  local function refresh_hunk_surface()
+    if vim.b[buffer].currantgit_title == "diff" then
+      open_diff_args(vim.b[buffer].currantgit_diff_args, root)
+    else
+      open_status(root)
+    end
   end
   local function refresh()
     if vim.b[buffer].currantgit_title == "log" then
@@ -384,14 +437,42 @@ local function action_context(buffer)
       action({ "restore", "--staged", "--", ":(literal)" .. item.path }, function() open_status(root) end)
     end,
     stage_hunk = function(item)
-      apply_hunk(item, { "apply", "--cached", "--unidiff-zero" }, function()
-        open_diff_args(vim.b[buffer].currantgit_diff_args, root)
-      end)
+      apply_hunk(item, { "apply", "--cached", "--unidiff-zero" }, refresh_hunk_surface)
     end,
     unstage_hunk = function(item)
-      apply_hunk(item, { "apply", "--cached", "--unidiff-zero", "--reverse" }, function()
-        open_diff_args(vim.b[buffer].currantgit_diff_args, root)
+      apply_hunk(item, { "apply", "--cached", "--unidiff-zero", "--reverse" }, refresh_hunk_surface)
+    end,
+    -- Batch variants for visual selections: one Git call per batch, one
+    -- `:(literal)` pathspec per path.
+    stage_paths = function(paths, callback)
+      action(vim.list_extend({ "add", "--" }, literal_pathspecs(paths)), callback or function() open_status(root) end)
+    end,
+    unstage_paths = function(paths, callback)
+      action(vim.list_extend({ "restore", "--staged", "--" }, literal_pathspecs(paths)),
+        callback or function() open_status(root) end)
+    end,
+    discard_paths = function(paths)
+      vim.ui.select({ "Discard", "Cancel" }, {
+        prompt = "Discard working-tree changes to " .. #paths .. " file(s)?\n  " .. table.concat(paths, "\n  ") .. "\n",
+      }, function(choice)
+        if choice ~= "Discard" then
+          return
+        end
+        action(vim.list_extend({ "restore", "--worktree", "--" }, literal_pathspecs(paths)), function() open_status(root) end)
       end)
+    end,
+    -- All selected hunks go to Git as ONE patch, so `git apply` either
+    -- applies every one of them or none (`git help apply`: it "fails the
+    -- whole patch" when any hunk does not apply).
+    apply_hunks = function(hunks, reverse)
+      local patch, error_message = combined_hunk_patch(hunks)
+      if not patch then
+        vim.notify("CurrantGit: " .. error_message, vim.log.levels.ERROR)
+        return
+      end
+      local args = { "apply", "--cached", "--unidiff-zero" }
+      if reverse then args[#args + 1] = "--reverse" end
+      action(args, refresh_hunk_surface, patch)
     end,
     commit = function(item)
       open_commit(item.commit, root)
@@ -564,6 +645,117 @@ local function dispatch_current_key(buffer, key)
   end
 end
 
+-- Every unique item on the visual selection's lines, in buffer order. File
+-- rows dedupe by path (a mixed file's staged and unstaged rows are one
+-- pathspec); hunks by mode and patch text, since inline diffs of
+-- different files each number their hunks from 1.
+local function selected_items(buffer)
+  local first, last = vim.fn.line("v"), vim.fn.line(".")
+  if first > last then first, last = last, first end
+  vim.cmd("normal! " .. vim.api.nvim_replace_termcodes("<Esc>", true, false, true))
+  local line_items = vim.b[buffer].currantgit_line_items or {}
+  local seen, items = {}, {}
+  for line = first, last do
+    local item = line_items[line]
+    if type(item) == "table" and (item.kind == "change" or item.kind == "hunk") then
+      local key = item.kind == "change" and ("change\0" .. item.path)
+        or ("hunk\0" .. tostring(item.mode) .. "\0" .. tostring(item.patch))
+      if not seen[key] then
+        seen[key] = true
+        items[#items + 1] = item
+      end
+    end
+  end
+  return items
+end
+
+local function is_available(id, context, item)
+  for _, action in ipairs(actions.available(item, context)) do
+    if action.id == id then return true end
+  end
+  return false
+end
+
+local function report_skipped(skipped, reason)
+  if #skipped > 0 then
+    vim.notify("CurrantGit: skipped " .. table.concat(skipped, ", ") .. " (" .. reason .. ")", vim.log.levels.WARN)
+  end
+end
+
+-- Visual `s`/`u`/`-`/`X`. `key` names the action family; each selected
+-- item is checked against the same registry predicate its normal-mode
+-- action uses, and anything that does not qualify is skipped and reported.
+local function dispatch_selection(buffer, key)
+  local items = selected_items(buffer)
+  local context = action_context(buffer)
+  local files, hunks = {}, {}
+  for _, item in ipairs(items) do
+    if item.kind == "change" then files[#files + 1] = item else hunks[#hunks + 1] = item end
+  end
+  if #files > 0 and #hunks > 0 then
+    vim.notify("CurrantGit: selection mixes files and hunks; select one or the other", vim.log.levels.WARN)
+    return
+  end
+  if #files == 0 and #hunks == 0 then
+    return
+  end
+  if #hunks > 0 then
+    local id = ({ s = "hunk.stage", u = "hunk.unstage" })[key]
+    if not id then
+      vim.notify("CurrantGit: " .. key .. " does not apply to hunks", vim.log.levels.WARN)
+      return
+    end
+    local chosen, skipped = {}, {}
+    for _, hunk in ipairs(hunks) do
+      if is_available(id, context, hunk) then
+        chosen[#chosen + 1] = hunk
+      else
+        skipped[#skipped + 1] = tostring(hunk.path) .. " " .. tostring(hunk.header)
+      end
+    end
+    report_skipped(skipped, id .. " unavailable")
+    if #chosen > 0 then context.apply_hunks(chosen, key == "u") end
+    return
+  end
+  local function partition(id)
+    local chosen, skipped = {}, {}
+    for _, item in ipairs(files) do
+      if is_available(id, context, item) then
+        chosen[#chosen + 1] = item.path
+      else
+        skipped[#skipped + 1] = item.path
+      end
+    end
+    report_skipped(skipped, id .. " unavailable")
+    return chosen
+  end
+  if key == "s" then
+    local paths = partition("item.stage")
+    if #paths > 0 then context.stage_paths(paths) end
+  elseif key == "u" then
+    local paths = partition("item.unstage")
+    if #paths > 0 then context.unstage_paths(paths) end
+  elseif key == "X" then
+    local paths = partition("item.discard")
+    if #paths > 0 then context.discard_paths(paths) end
+  elseif key == "-" then
+    -- Same per-item rule as item.toggle: anything with staged content
+    -- unstages, everything else stages. At most two Git calls.
+    local to_stage, to_unstage = {}, {}
+    for _, item in ipairs(files) do
+      if item.status ~= "??" and item.status:sub(1, 1) ~= " " then
+        to_unstage[#to_unstage + 1] = item.path
+      else
+        to_stage[#to_stage + 1] = item.path
+      end
+    end
+    local function stage()
+      if #to_stage > 0 then context.stage_paths(to_stage) else context.refresh() end
+    end
+    if #to_unstage > 0 then context.unstage_paths(to_unstage, stage) else stage() end
+  end
+end
+
 local function attach_status(buffer)
   navigation.visit(0)
   local map = function(mode, lhs, rhs)
@@ -574,13 +766,18 @@ local function attach_status(buffer)
   map("n", "[x", function() dispatch_current(buffer, "conflict.prev") end)
   map("n", "d", function() dispatch_current(buffer, "item.diff") end)
   map("n", "b", function() dispatch_current(buffer, "item.blame") end)
-  map("n", "s", function() dispatch_current(buffer, "item.stage") end)
-  map("n", "u", function() dispatch_current(buffer, "item.unstage") end)
+  -- `s`/`u` resolve per item kind: a file row stages the file, a hunk in
+  -- an inline `=` diff stages just that hunk.
+  map("n", "s", function() dispatch_current_key(buffer, "s") end)
+  map("n", "u", function() dispatch_current_key(buffer, "u") end)
   map("n", "-", function() dispatch_current(buffer, "item.toggle") end)
   map("n", "X", function() dispatch_current(buffer, "item.discard") end)
   map("n", "r", function() dispatch_current(buffer, "surface.refresh") end)
   map("n", "g?", function() dispatch_current(buffer, "surface.help") end)
   map("n", "=", function() dispatch_current_key(buffer, "=") end)
+  for _, key in ipairs({ "s", "u", "-", "X" }) do
+    map("x", key, function() dispatch_selection(buffer, key) end)
+  end
   local group = vim.api.nvim_create_augroup("CurrantGitStatus" .. buffer, { clear = true })
   vim.api.nvim_create_autocmd("CursorMoved", {
     group = group,
@@ -607,6 +804,12 @@ attach_diff = function(buffer)
   })
   vim.keymap.set("n", "u", function() dispatch_current(buffer, "hunk.unstage") end, {
     buffer = buffer, silent = true, desc = "Unstage diff hunk",
+  })
+  vim.keymap.set("x", "s", function() dispatch_selection(buffer, "s") end, {
+    buffer = buffer, silent = true, desc = "Stage selected diff hunks",
+  })
+  vim.keymap.set("x", "u", function() dispatch_selection(buffer, "u") end, {
+    buffer = buffer, silent = true, desc = "Unstage selected diff hunks",
   })
 end
 
