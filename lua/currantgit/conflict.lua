@@ -1,4 +1,4 @@
--- Read-only conflict model and resolver view (docs/issues/0010, slice 1).
+-- Conflict model and resolver view (docs/issues/0010, slices 1-2).
 --
 -- Two sources, never confused:
 --   * sides (ours/base/theirs, and how many regions the file started with)
@@ -8,13 +8,17 @@
 --     worktree file;
 --   * region locations come from the conflict markers still present in the
 --     worktree (or the live result buffer).
--- Nothing in this module writes the index or the worktree.
+-- Region choices (slice 2) edit only the result buffer, as one undo step
+-- each; nothing in this module writes the index or saves the file.
 local M = {}
 
 local panes = require("currantgit.panes")
 
 local deps = {}
 local namespace = vim.api.nvim_create_namespace("currantgit_conflict")
+-- Tracks where each chosen side was inserted; extmarks follow later edits.
+local resolved_namespace = vim.api.nvim_create_namespace("currantgit_conflict_resolved")
+local registry
 
 -- Ours and theirs get their own tints (lua/currantgit/panes.lua).
 local function define_highlights()
@@ -25,6 +29,7 @@ local function define_highlights()
       CurrantGitConflictMarker = { fg = panes.blend(palette.fg, palette.bg, 0.4) },
       CurrantGitConflictFiller = { fg = panes.blend(palette.fg, palette.bg, 0.16) },
       CurrantGitConflictResult = {},
+      CurrantGitConflictResolvedLabel = { fg = palette.comment, bold = true },
     }
     panes.side_groups(groups, "CurrantGitConflictOurs", palette.cool, palette)
     return panes.side_groups(groups, "CurrantGitConflictTheirs", palette.warm, palette)
@@ -93,7 +98,7 @@ end
 -- order. A region whose markers are gone is resolved ("edited" until slice
 -- 2 can say which side won); a live region with no stage counterpart is
 -- still listed so nothing the user can see is hidden.
-function M.match(path, stage_regions, live_regions)
+function M.match(path, stage_regions, live_regions, choices)
   local items = {}
   local next_stage = 1
   local extra = {}
@@ -123,7 +128,7 @@ function M.match(path, stage_regions, live_regions)
       theirs = sides.theirs,
       base = sides.base,
       result_range = live and { live.start, live.finish } or nil,
-      state = live and "unresolved" or "edited",
+      state = live and "unresolved" or (choices and choices[tostring(n)]) or "edited",
     }
   end
   for n, stage_region in ipairs(stage_regions) do
@@ -315,14 +320,40 @@ local function side_names(root, done)
   end)
 end
 
+local LABELS = {
+  ours = "ours", theirs = "theirs", base = "base",
+  both_ours_first = "ours + theirs", both_theirs_first = "theirs + ours",
+}
+
+-- Choices for regions whose markers came back (undo, or retyped by hand)
+-- no longer apply; drop them along with their position marks.
+local function prune_choices(buffer, item, live)
+  local choices = vim.b[buffer].currantgit_conflict_choices or {}
+  local marks = vim.b[buffer].currantgit_conflict_marks or {}
+  for _, region in ipairs(M.match(item.path, item.regions or {}, live)) do
+    local key = tostring(region.index)
+    if region.state == "unresolved" and choices[key] then
+      choices[key] = nil
+      if marks[key] then pcall(vim.api.nvim_buf_del_extmark, buffer, resolved_namespace, marks[key]) end
+      marks[key] = nil
+    end
+  end
+  vim.b[buffer].currantgit_conflict_choices = choices
+  vim.b[buffer].currantgit_conflict_marks = marks
+  return choices, marks
+end
+
 -- Colors each live region by side and labels its marker lines at end of
--- line. The marker text itself stays visible: it is real buffer content the
--- user is about to edit. Also refreshes the "n of m resolved" winbar.
+-- line; the region under the cursor gets the stronger tints. The marker
+-- text itself stays visible: it is real buffer content. Resolved regions
+-- get a "✓ <choice>" label. Also refreshes the "n of m resolved" winbar.
 local function decorate(buffer)
   if not vim.api.nvim_buf_is_valid(buffer) then return end
   vim.api.nvim_buf_clear_namespace(buffer, namespace, 0, -1)
   local item = vim.b[buffer].currantgit_conflict
   local live = M.parse_markers(vim.api.nvim_buf_get_lines(buffer, 0, -1, false))
+  local window = vim.fn.bufwinid(buffer)
+  local cursor = window ~= -1 and vim.api.nvim_win_get_cursor(window)[1] or 0
   local function line(row, group, text, label_group)
     vim.api.nvim_buf_set_extmark(buffer, namespace, row - 1, 0, {
       line_hl_group = group,
@@ -335,9 +366,11 @@ local function decorate(buffer)
     for row = first, last do line(row, group) end
   end
   for _, region in ipairs(live) do
+    local current = cursor >= region.start and cursor <= region.finish
+    local suffix = current and "Text" or ""
     local ours_end = (region.base_marker or region.separator) - 1
     line(region.start, "CurrantGitConflictMarker", "  ours", "CurrantGitConflictOursLabel")
-    span(region.start + 1, ours_end, "CurrantGitConflictOurs")
+    span(region.start + 1, ours_end, "CurrantGitConflictOurs" .. suffix)
     if region.base_marker then
       line(region.base_marker, "CurrantGitConflictMarker", "  base", "CurrantGitConflictBaseLabel")
       -- A text highlight, not a line one: it has to beat the line colors.
@@ -349,13 +382,25 @@ local function decorate(buffer)
       end
     end
     line(region.separator, "CurrantGitConflictMarker")
-    span(region.separator + 1, region.finish - 1, "CurrantGitConflictTheirs")
+    span(region.separator + 1, region.finish - 1, "CurrantGitConflictTheirs" .. suffix)
     line(region.finish, "CurrantGitConflictMarker", "  theirs", "CurrantGitConflictTheirsLabel")
   end
-  local window = vim.fn.bufwinid(buffer)
-  if window ~= -1 and item then
+  if not item then return end
+  local choices, marks = prune_choices(buffer, item, live)
+  for key, state in pairs(choices) do
+    local mark = marks[key] and vim.api.nvim_buf_get_extmark_by_id(buffer, resolved_namespace, marks[key], {})
+    if mark and mark[1] then
+      local row = math.min(mark[1], vim.api.nvim_buf_line_count(buffer) - 1)
+      vim.api.nvim_buf_set_extmark(buffer, namespace, row, 0, {
+        virt_text = { { "  ✓ " .. (LABELS[state] or state), "CurrantGitConflictResolvedLabel" } },
+        virt_text_pos = "eol",
+        priority = 4200,
+      })
+    end
+  end
+  if window ~= -1 then
     local unresolved = 0
-    for _, region in ipairs(M.match(item.path, item.regions or {}, live)) do
+    for _, region in ipairs(M.match(item.path, item.regions or {}, live, choices)) do
       if region.state == "unresolved" then unresolved = unresolved + 1 end
     end
     local total = math.max(#(item.regions or {}), unresolved)
@@ -364,6 +409,48 @@ local function decorate(buffer)
       and string.format("%s — %d of %d resolved", path, total - unresolved, total)
       or path
   end
+end
+
+-- Region items for a result buffer, with each one's current state.
+function M.regions(buffer)
+  local item = vim.b[buffer].currantgit_conflict
+  if not item then return {} end
+  local live = M.parse_markers(vim.api.nvim_buf_get_lines(buffer, 0, -1, false))
+  return M.match(item.path, item.regions or {}, live, vim.b[buffer].currantgit_conflict_choices)
+end
+
+local CHOICES = {
+  ours = function(region) return region.ours end,
+  theirs = function(region) return region.theirs end,
+  both_ours_first = function(region) return vim.list_extend(vim.deepcopy(region.ours), region.theirs) end,
+  both_theirs_first = function(region) return vim.list_extend(vim.deepcopy(region.theirs), region.ours) end,
+  base = function(region) return region.base end,
+}
+
+-- Replaces the region (markers included) with the chosen side(s): one
+-- nvim_buf_set_lines call, so one `u` brings the markers back.
+function M.take(buffer, region, state)
+  local lines = CHOICES[state](region)
+  if not lines then
+    vim.notify("CurrantGit: this region has no base (merge-style markers); gb shows the base file",
+      vim.log.levels.WARN)
+    return false
+  end
+  local range = region.result_range
+  vim.api.nvim_buf_set_lines(buffer, range[1] - 1, range[2], false, lines)
+  local key = tostring(region.index)
+  local marks = vim.b[buffer].currantgit_conflict_marks or {}
+  if marks[key] then pcall(vim.api.nvim_buf_del_extmark, buffer, resolved_namespace, marks[key]) end
+  local row = math.min(range[1] - 1, math.max(vim.api.nvim_buf_line_count(buffer) - 1, 0))
+  marks[key] = vim.api.nvim_buf_set_extmark(buffer, resolved_namespace, row, 0, {})
+  local choices = vim.b[buffer].currantgit_conflict_choices or {}
+  choices[key] = state
+  vim.b[buffer].currantgit_conflict_choices = choices
+  vim.b[buffer].currantgit_conflict_marks = marks
+  local window = vim.fn.bufwinid(buffer)
+  if window ~= -1 then vim.api.nvim_win_set_cursor(window, { row + 1, 0 }) end
+  decorate(buffer)
+  return true
 end
 
 local function attach_pane(buffer, run_action)
@@ -375,12 +462,78 @@ local function attach_pane(buffer, run_action)
   if vim.b[buffer].currantgit_conflict_pane == "result" then
     map("]x", "conflict.next")
     map("[x", "conflict.prev")
+    -- Region keys only mean something inside a region. Everywhere else
+    -- they are Vim's own `c{motion}`, replayed unmapped with any count.
+    for lhs, id in pairs({
+      co = "conflict.take_ours", ct = "conflict.take_theirs", cb = "conflict.take_both",
+      cB = "conflict.take_both_theirs_first", c0 = "conflict.take_base",
+    }) do
+      vim.keymap.set("n", lhs, function()
+        local region = M.current_region(buffer)
+        if not region then
+          local count = vim.v.count > 0 and tostring(vim.v.count) or ""
+          vim.api.nvim_feedkeys(count .. lhs, "in", false)
+          return
+        end
+        local ok, message = registry.dispatch(id, { buffer = buffer }, region)
+        if not ok and message then vim.notify("CurrantGit: " .. message, vim.log.levels.WARN) end
+      end, { buffer = buffer, silent = true, desc = "CurrantGit conflict" })
+    end
   end
   map("gb", "conflict.base_toggle")
+  map("gl", "conflict.layout_toggle")
 end
 
--- Opens ours | result | theirs in a new tab with native diff mode. The
--- result pane is the real worktree file, so saving and undo are Vim's own.
+-- Adds ours | … | theirs around the result window and turns on native
+-- diff mode. The side contents were fetched once, when the view opened.
+local function show_sides(view)
+  local result_window = vim.fn.bufwinid(view.result)
+  if result_window == -1 then return end
+  local origin = vim.api.nvim_get_current_win()
+  local item = vim.b[view.result].currantgit_conflict
+  local ours = side_buffer("ours", item.path, view.lines.ours, view.lines.ours_missing)
+  local theirs = side_buffer("theirs", item.path, view.lines.theirs, view.lines.theirs_missing)
+  vim.api.nvim_win_call(result_window, function()
+    vim.cmd("leftabove vsplit")
+    vim.api.nvim_set_current_buf(ours)
+    vim.wo.winbar = label("ours", item, view.names)
+    vim.wo.winhighlight = SIDE_HIGHLIGHT.ours
+  end)
+  vim.api.nvim_win_call(result_window, function()
+    vim.cmd("rightbelow vsplit")
+    vim.api.nvim_set_current_buf(theirs)
+    vim.wo.winbar = label("theirs", item, view.names)
+    vim.wo.winhighlight = SIDE_HIGHLIGHT.theirs
+  end)
+  for _, buffer in ipairs({ ours, view.result, theirs }) do
+    vim.api.nvim_win_call(vim.fn.bufwinid(buffer), function() vim.cmd("diffthis") end)
+    panes.fill_with_hatching(vim.fn.bufwinid(buffer))
+  end
+  for _, buffer in ipairs({ ours, theirs }) do
+    vim.b[buffer].currantgit_root = view.root
+    attach_pane(buffer, deps.dispatch)
+  end
+  panes.map_quit({ ours, theirs }, "currantgit_conflict")
+  vim.api.nvim_set_current_win(origin)
+  view.ours, view.theirs = ours, theirs
+end
+
+local function hide_sides(view)
+  for _, side in ipairs({ "ours", "theirs" }) do
+    local buffer = view[side]
+    local window = buffer and vim.api.nvim_buf_is_valid(buffer) and vim.fn.bufwinid(buffer) or -1
+    if window ~= -1 then vim.api.nvim_win_close(window, true) end
+    view[side] = nil
+  end
+  local result_window = vim.fn.bufwinid(view.result)
+  if result_window ~= -1 then
+    vim.api.nvim_win_call(result_window, function() vim.cmd("diffoff") end)
+  end
+end
+
+-- Opens the resolver in a new tab: ours | result | theirs in native diff
+-- mode, or the result alone (`conflict.layout = "single"`). The result is
+-- the real worktree file, so saving and undo are Vim's own.
 function M.open(status_item, root)
   M.load(root, status_item, function(item)
     if not item.exists then
@@ -392,30 +545,24 @@ function M.open(status_item, root)
       show_stage(root, item, 3, function(theirs, theirs_missing)
         vim.cmd("tabnew " .. vim.fn.fnameescape(root .. "/" .. item.path))
         local result = vim.api.nvim_get_current_buf()
-        local result_window = vim.api.nvim_get_current_win()
         vim.b[result].currantgit_conflict = item
         vim.b[result].currantgit_conflict_pane = "result"
+        vim.b[result].currantgit_conflict_choices = {}
+        vim.b[result].currantgit_conflict_marks = {}
         vim.b[result].currantgit_root = root
-        local ours_buffer = side_buffer("ours", item.path, ours, ours_missing)
-        local theirs_buffer = side_buffer("theirs", item.path, theirs, theirs_missing)
-        vim.cmd("leftabove vsplit")
-        vim.api.nvim_set_current_buf(ours_buffer)
-        vim.wo.winbar = label("ours", item, names)
-        vim.wo.winhighlight = SIDE_HIGHLIGHT.ours
-        vim.api.nvim_set_current_win(result_window)
-        vim.cmd("rightbelow vsplit")
-        vim.api.nvim_set_current_buf(theirs_buffer)
         local first = M.parse_markers(vim.api.nvim_buf_get_lines(result, 0, -1, false))[1]
         names.theirs = vim.trim(((first and first.theirs_label) or "") .. " " .. (names.theirs_sha or ""))
         if names.theirs == "" then names.theirs = nil end
-        vim.wo.winbar = label("theirs", item, names)
-        vim.wo.winhighlight = SIDE_HIGHLIGHT.theirs
-        vim.api.nvim_set_current_win(result_window)
         vim.wo.winhighlight = SIDE_HIGHLIGHT.result
-        panes.diff_tab()
+        local view = {
+          result = result, root = root, path = item.path, names = names,
+          lines = { ours = ours, ours_missing = ours_missing, theirs = theirs, theirs_missing = theirs_missing },
+        }
+        if (deps.layout and deps.layout() or "three") == "three" then show_sides(view) end
+        vim.t.currantgit_conflict = view
         decorate(result)
         local group = vim.api.nvim_create_augroup("CurrantGitConflict" .. result, { clear = true })
-        vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI" }, {
+        vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI", "CursorMoved" }, {
           group = group, buffer = result, callback = function() decorate(result) end,
         })
         -- The result is the user's real file: drop the decorations once it
@@ -424,21 +571,34 @@ function M.open(status_item, root)
           group = group, buffer = result,
           callback = function()
             vim.api.nvim_buf_clear_namespace(result, namespace, 0, -1)
+            vim.api.nvim_buf_clear_namespace(result, resolved_namespace, 0, -1)
             vim.api.nvim_del_augroup_by_id(group)
           end,
         })
-        vim.t.currantgit_conflict = {
-          ours = ours_buffer, result = result, theirs = theirs_buffer, root = root, path = item.path,
-        }
-        for _, buffer in ipairs({ ours_buffer, result, theirs_buffer }) do
-          vim.b[buffer].currantgit_root = root
-          attach_pane(buffer, deps.dispatch)
-        end
-        panes.map_quit({ ours_buffer, result, theirs_buffer }, "currantgit_conflict")
+        attach_pane(result, deps.dispatch)
+        panes.map_quit({ result }, "currantgit_conflict")
       end)
     end)
     end)
   end)
+end
+
+-- Switches the open resolver between one pane and three; focus stays on
+-- the result.
+function M.toggle_layout()
+  local view = vim.t.currantgit_conflict
+  if not view then return false end
+  local result_window = vim.fn.bufwinid(view.result)
+  if result_window == -1 then return false end
+  if view.ours and vim.api.nvim_buf_is_valid(view.ours) and vim.fn.bufwinid(view.ours) ~= -1 then
+    hide_sides(view)
+  else
+    show_sides(view)
+  end
+  vim.api.nvim_set_current_win(result_window)
+  vim.t.currantgit_conflict = view
+  decorate(view.result)
+  return true
 end
 
 -- Toggles a read-only stage-1 view under the result pane. It stays out of
@@ -481,7 +641,7 @@ function M.current_region(buffer)
   if window == -1 then return nil end
   local line = vim.api.nvim_win_get_cursor(window)[1]
   local live = M.parse_markers(vim.api.nvim_buf_get_lines(buffer, 0, -1, false))
-  for _, region in ipairs(M.match(item.path, item.regions, live)) do
+  for _, region in ipairs(M.match(item.path, item.regions, live, vim.b[buffer].currantgit_conflict_choices)) do
     local range = region.result_range
     if range and line >= range[1] and line <= range[2] then return region end
   end
@@ -522,6 +682,8 @@ function M.jump(buffer, direction)
     end
   end
   if target then vim.api.nvim_win_set_cursor(window, { target, 0 }) end
+  -- Redraw the current-region tint now rather than on the next CursorMoved.
+  if vim.b[buffer].currantgit_conflict_pane == "result" then decorate(buffer) end
   return true
 end
 
@@ -537,6 +699,37 @@ function M.setup(options)
 end
 
 function M.register(actions, open)
+  registry = actions
+  local function in_result(context)
+    return context and context.buffer and vim.b[context.buffer].currantgit_conflict_pane == "result"
+  end
+  for _, take in ipairs({
+    { "conflict.take_ours", "co", "take ours", "ours" },
+    { "conflict.take_theirs", "ct", "take theirs", "theirs" },
+    { "conflict.take_both", "cb", "take both (ours first)", "both_ours_first" },
+    { "conflict.take_both_theirs_first", "cB", "take both (theirs first)", "both_theirs_first" },
+    { "conflict.take_base", "c0", "take base", "base" },
+  }) do
+    actions.register({
+      id = take[1],
+      label = take[3],
+      key = take[2],
+      applies_to = { "conflict" },
+      is_available = function(context, item) return in_result(context) and item.state == "unresolved" end,
+      run = function(context, item) return M.take(context.buffer, item, take[4]) end,
+    })
+  end
+  actions.register({
+    id = "conflict.layout_toggle",
+    label = "toggle layout",
+    key = "gl",
+    desc = "switch the resolver between one pane and three",
+    applies_to = { "*" },
+    is_available = function(context)
+      return context and context.buffer and vim.b[context.buffer].currantgit_conflict_pane ~= nil
+    end,
+    run = function() return M.toggle_layout() end,
+  })
   actions.register({
     id = "conflict.open",
     label = "resolve",

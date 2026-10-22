@@ -360,7 +360,142 @@ local function test_resolver_interactions()
   vim.fn.delete(dir, "rf")
 end
 
+-- 5. Slice 2: region choices edit only the result buffer (one undo step
+-- each), keys fall back to native Vim outside a region, and the layout
+-- toggles between one pane and three.
+local function result_lines()
+  return vim.api.nvim_buf_get_lines(0, 0, -1, false)
+end
+
+local function region_by_index(buffer, n)
+  for _, region in ipairs(conflict.regions(buffer)) do
+    if region.index == n then return region end
+  end
+end
+
+local function open_resolver(dir, path)
+  open_status(dir)
+  vim.api.nvim_win_set_cursor(0, { (status_row(path)), 0 })
+  press("<CR>")
+  wait_for(function() return vim.t.currantgit_conflict ~= nil end, "resolver did not open")
+  return vim.t.currantgit_conflict
+end
+
+local function test_region_actions()
+  local dir = conflicted_repo({ ["f.txt"] = { base = BASE, ours = OURS, theirs = THEIRS } }, "diff3")
+  local before = snapshot(dir)
+  local on_disk = read_file(dir .. "/f.txt")
+  local view = open_resolver(dir, "f.txt")
+  local result = view.result
+  local window = vim.api.nvim_get_current_win()
+  local original = result_lines()
+
+  -- The region under the cursor is drawn stronger than the others.
+  vim.api.nvim_win_set_cursor(0, { 1, 0 })
+  press("]x")
+  local namespace = vim.api.nvim_create_namespace("currantgit_conflict")
+  local current_groups = {}
+  for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(result, namespace, 0, -1, { details = true })) do
+    if mark[4].line_hl_group then current_groups[mark[4].line_hl_group] = true end
+  end
+  assert(current_groups.CurrantGitConflictOursText and current_groups.CurrantGitConflictTheirsText,
+    "the current region should use the stronger tints")
+
+  local choices = {
+    { key = "co", state = "ours", lines = { "X", "Z" } },
+    { key = "ct", state = "theirs", lines = { "X", "Y" } },
+    { key = "cb", state = "both_ours_first", lines = { "X", "Z", "X", "Y" } },
+    { key = "cB", state = "both_theirs_first", lines = { "X", "Y", "X", "Z" } },
+    { key = "c0", state = "base", lines = { "b" } },
+  }
+  for _, choice in ipairs(choices) do
+    local start = conflict.parse_markers(result_lines())[1].start
+    vim.api.nvim_win_set_cursor(0, { start + 1, 0 })
+    local tick = vim.api.nvim_buf_get_changedtick(result)
+    press(choice.key)
+    assert(vim.api.nvim_buf_get_changedtick(result) > tick, choice.key .. " did not edit the buffer")
+    local lines = result_lines()
+    assert(vim.deep_equal(vim.list_slice(lines, start, start + #choice.lines - 1), choice.lines),
+      choice.key .. " inserted the wrong side")
+    assert(#conflict.parse_markers(lines) == 1, choice.key .. " should resolve exactly one region")
+    assert(vim.api.nvim_win_get_cursor(0)[1] == start)
+    local region = region_by_index(result, 1)
+    assert(region.state == choice.state, choice.key .. ": state " .. tostring(region.state))
+    assert(vim.wo[window].winbar:find("1 of 2 resolved", 1, true), vim.wo[window].winbar)
+    local labels = {}
+    for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(result, namespace, 0, -1, { details = true })) do
+      for _, chunk in ipairs(mark[4].virt_text or {}) do labels[#labels + 1] = chunk[1] end
+    end
+    assert(table.concat(labels, " "):find("✓", 1, true), "a resolved region should be labelled")
+    vim.cmd("silent normal! u")
+    vim.api.nvim_exec_autocmds("TextChanged", { buffer = result })
+    assert(vim.deep_equal(result_lines(), original), choice.key .. " was not a single undo step")
+    assert(region_by_index(result, 1).state == "unresolved", "undo should bring the region back")
+    assert(vim.wo[window].winbar:find("0 of 2 resolved", 1, true))
+  end
+
+  -- Outside a region the keys are plain Vim: `cb` changes back a word.
+  local gamma = vim.fn.index(result_lines(), "c") + 1
+  vim.api.nvim_buf_set_lines(result, gamma - 1, gamma, false, { "gamma" })
+  vim.api.nvim_win_set_cursor(0, { gamma, 3 })
+  vim.api.nvim_feedkeys(vim.keycode("cbZ<Esc>"), "xt", false)
+  assert(result_lines()[gamma] == "Zma", "cb outside a region must stay native: " .. result_lines()[gamma])
+  vim.cmd("silent normal! u")
+  vim.cmd("silent normal! u")
+  assert(vim.deep_equal(result_lines(), original))
+
+  -- Layout toggle: one pane (no diff mode, decorations stay), and back.
+  press("gl")
+  assert(#vim.api.nvim_tabpage_list_wins(0) == 1, "gl should leave only the result pane")
+  assert(not vim.wo.diff and vim.api.nvim_get_current_buf() == result)
+  assert(vim.wo.winbar:find("0 of 2 resolved", 1, true))
+  local start = conflict.parse_markers(result_lines())[2].start
+  vim.api.nvim_win_set_cursor(0, { start, 0 })
+  press("ct")
+  assert(region_by_index(result, 2).state == "theirs", "choices work in the single pane")
+  vim.cmd("silent normal! u")
+  press("gl")
+  wait_for(function() return #vim.api.nvim_tabpage_list_wins(0) == 3 end, "gl did not restore three panes")
+  for _, pane in ipairs(vim.api.nvim_tabpage_list_wins(0)) do assert(vim.wo[pane].diff) end
+  assert(vim.api.nvim_get_current_buf() == result)
+
+  -- Nothing was written: the file on disk and the index are untouched.
+  assert(read_file(dir .. "/f.txt") == on_disk, "region actions must not write the file")
+  vim.bo[result].modified = false
+  vim.cmd("tabclose")
+
+  -- The default layout is configurable.
+  currantgit.setup({ conflict = { layout = "single" } })
+  open_resolver(dir, "f.txt")
+  assert(#vim.api.nvim_tabpage_list_wins(0) == 1 and not vim.wo.diff, "layout = single opens one pane")
+  vim.cmd("tabclose")
+  currantgit.setup({})
+  assert(vim.deep_equal(before, snapshot(dir)), "region actions changed repository state")
+  vim.cmd("cd " .. vim.fn.fnameescape(original_cwd))
+  vim.fn.delete(dir, "rf")
+end
+
+-- merge-style markers carry no base, so `c0` refuses instead of guessing.
+local function test_take_base_without_base()
+  local dir = conflicted_repo({ ["f.txt"] = { base = BASE, ours = OURS, theirs = THEIRS } }, "merge")
+  open_resolver(dir, "f.txt")
+  local lines = result_lines()
+  vim.api.nvim_win_set_cursor(0, { conflict.parse_markers(lines)[1].start, 0 })
+  local notify, warned = vim.notify, nil
+  vim.notify = function(message) warned = message end
+  press("c0")
+  vim.notify = notify
+  assert(vim.deep_equal(result_lines(), lines), "c0 without a base must not edit")
+  assert(warned and warned:find("base", 1, true))
+  vim.bo.modified = false
+  vim.cmd("tabclose")
+  vim.cmd("cd " .. vim.fn.fnameescape(original_cwd))
+  vim.fn.delete(dir, "rf")
+end
+
 test_parse_markers()
 test_styles_and_counts()
 test_missing_stages_and_binary()
 test_resolver_interactions()
+test_region_actions()
+test_take_base_without_base()
