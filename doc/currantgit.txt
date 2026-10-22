@@ -56,6 +56,8 @@ On a change item:
 <CR>                    Open the file. Deleted files open their last
                         available Git revision read-only.
 d                       Show the file diff.
+D                       Open old | new side by side in a new tab, in native
+                        |diff-mode|. See |currantgit-diff-split|.
 b                       Open the blame companion.
 s                       Stage the file.
 u                       Unstage the file.
@@ -215,6 +217,33 @@ CurrantGitConflictResult        Diff colors in the result pane (none, so
 
 Markers are assumed to be the default 7 characters; a custom
 `conflict-marker-size` attribute is not read yet.
+
+DIFF SPLIT                                              *currantgit-diff-split*
+
+`D` (`item.diff_split`) on a staged or unstaged change row opens a new tab
+with the old side on the left and the new side on the right, in native
+|diff-mode|, so |]c|, |[c|, |do| and |dp| work. The comparison follows the
+row's section, like `=`:
+
+staged                  `HEAD:<path>` | `:0:<path>`, both read-only.
+unstaged                `:0:<path>` (read-only) | the real worktree file,
+                        which you can edit and save as usual.
+
+Renames and copies read the old side from the source path. A missing side
+(an added file has no HEAD side; a deleted file has no new side) is an empty
+read-only pane whose winbar says "(none)" or "(deleted)". Winbars name each
+side: `HEAD <short sha>`, `index`, `worktree`. Read-only sides are
+`currantgit://diff/<side>/<path>` buffers. Opening the split never writes the
+index or the worktree. Untracked and conflict rows do not offer `D`.
+
+It uses the resolver's presentation: hatched filler and tints mixed from
+DiagnosticWarn (old) and DiagnosticInfo (new), recomputed on |ColorScheme|:
+
+CurrantGitDiffOld               Old-side diff lines (warm tint)
+CurrantGitDiffOldText           Changed text on old-side lines
+CurrantGitDiffNew               New-side diff lines (cool tint)
+CurrantGitDiffNewText           Changed text on new-side lines
+CurrantGitDiffFiller            Hatched filler (faint, instead of DiffDelete)
 
 ===============================================================================
 LOG                                                             *currantgit-log*
