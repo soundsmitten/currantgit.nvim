@@ -188,7 +188,8 @@ CONFLICTS                                                 *currantgit-conflicts*
 
 Each row in the status Conflicts section is a `conflict-file:<path>` item,
 and each conflict region inside it is a `conflict:<path>:<n>` item. This
-first slice is read-only: nothing here writes the index or the worktree.
+resolver never writes the index or saves the file: region choices edit the
+result buffer only, and you save with `:w` as usual.
 
 Sides come from the index stages, not from re-reading markers you may already
 have edited: `git ls-files -u` says which stages exist, `git merge-file
@@ -224,6 +225,28 @@ gb                      Show or hide the merge base (stage 1) under the
                         mode.
 gq                      Close the resolver tab from any pane. Unsaved edits
                         to the result stay in its (hidden) buffer.
+gl                      Switch between three panes and the result alone
+                        (no diff mode; colors, labels, counts and every key
+                        below still work). The default is the
+                        `conflict.layout` option: "three" or "single".
+
+With the cursor inside a conflict region in the result pane:
+
+co                      Take ours.
+ct                      Take theirs.
+cb                      Take both, ours first.
+cB                      Take both, theirs first.
+c0                      Take the base. Only diff3/zdiff3 markers carry a
+                        region's base; with merge-style markers this refuses
+                        and points you to `gb`.
+
+Each choice replaces the whole region, markers included, in one undoable
+change: `u` brings the markers back. A resolved region is labelled
+"✓ ours", "✓ theirs + ours", and so on, and the winbar count goes up. The
+region under the cursor is drawn with stronger tints. Outside a region these
+keys are Vim's own |c| with a motion (`cb` still changes back a word); see
+docs/decisions/0014. Marking the file resolved (`git add`) is still `s` in
+status.
 
 Presentation: each side has its own colors in its pane and inside the
 result's conflict blocks, filler lines are hatched (`diff:╱` in

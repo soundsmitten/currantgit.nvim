@@ -1824,6 +1824,7 @@ function M.setup(opts)
       end, input)
     end,
     dispatch = dispatch_current,
+    layout = function() return config.get().conflict.layout end,
   })
   conflict.register(actions, conflict.open)
   diffsplit.setup({

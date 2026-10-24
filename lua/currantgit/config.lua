@@ -16,6 +16,10 @@ M.defaults = {
       untracked = "?",
     },
   },
+  conflict = {
+    -- "three": ours | result | theirs; "single": the result alone.
+    layout = "three",
+  },
 }
 
 local options = vim.deepcopy(M.defaults)
@@ -31,6 +35,9 @@ local function validate(config)
     if type(config.ui[key]) ~= "boolean" then
       error("CurrantGit: ui." .. key .. " must be a boolean")
     end
+  end
+  if config.conflict.layout ~= "three" and config.conflict.layout ~= "single" then
+    error('CurrantGit: conflict.layout must be "three" or "single"')
   end
   for kind, icon in pairs(config.ui.icons) do
     if type(icon) ~= "string" then
