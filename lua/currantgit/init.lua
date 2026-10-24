@@ -4,6 +4,7 @@ local actions = require("currantgit.actions")
 local activity = require("currantgit.activity")
 local blame = require("currantgit.blame")
 local conflict = require("currantgit.conflict")
+local diffsplit = require("currantgit.diffsplit")
 local diff = require("currantgit.diff")
 local git_log = require("currantgit.log")
 local navigation = require("currantgit.navigation")
@@ -491,6 +492,35 @@ local function action_context(buffer)
   return context
 end
 
+-- `gq` quits any surface (docs: currantgit-quit). A surface that opened
+-- its own split closes it; otherwise the window goes back to the non-
+-- CurrantGit buffer the first surface replaced in it.
+local function remember_origin()
+  local current = vim.api.nvim_get_current_buf()
+  if vim.b[current].currantgit_title == nil then
+    vim.w.currantgit_origin = current
+  end
+end
+
+local function quit_surface()
+  local window = vim.api.nvim_get_current_win()
+  local others = #vim.api.nvim_tabpage_list_wins(0) > 1
+  local origin = vim.w.currantgit_origin
+  if vim.w.currantgit_split and others then
+    vim.api.nvim_win_close(window, false)
+  elseif origin and vim.api.nvim_buf_is_valid(origin) then
+    vim.api.nvim_set_current_buf(origin)
+  elseif others then
+    vim.api.nvim_win_close(window, false)
+  else
+    vim.cmd("enew")
+  end
+end
+
+local function map_quit(buffer)
+  vim.keymap.set("n", "gq", quit_surface, { buffer = buffer, silent = true, desc = "CurrantGit: quit" })
+end
+
 open_deleted = function(item, root)
   local error_message
   if not root then root, error_message = repository_root() end
@@ -524,7 +554,9 @@ open_deleted = function(item, root)
         buffer = vim.api.nvim_create_buf(false, true)
         vim.api.nvim_buf_set_name(buffer, name)
       end
+      remember_origin()
       vim.api.nvim_set_current_buf(buffer)
+      map_quit(buffer)
       set_modifiable(buffer, function()
         vim.api.nvim_buf_set_lines(buffer, 0, -1, false, vim.split(result.stdout or "", "\n", { plain = true }))
       end)
@@ -765,6 +797,7 @@ local function attach_status(buffer)
   map("n", "]x", function() dispatch_current(buffer, "conflict.next") end)
   map("n", "[x", function() dispatch_current(buffer, "conflict.prev") end)
   map("n", "d", function() dispatch_current(buffer, "item.diff") end)
+  map("n", "D", function() dispatch_current(buffer, "item.diff_split") end)
   map("n", "b", function() dispatch_current(buffer, "item.blame") end)
   -- `s`/`u` resolve per item kind: a file row stages the file, a hunk in
   -- an inline `=` diff stages just that hunk.
@@ -864,8 +897,11 @@ set_buffer = function(lines, items, title, line_items, root, fold_levels, highli
     -- internal navigation (refresh, stage, opening a diff from status, ...)
     -- always passes nothing, so it never triggers a split.
     vim.cmd(mods .. " split")
+    vim.w.currantgit_split = true
   end
+  remember_origin()
   vim.api.nvim_set_current_buf(buffer)
+  map_quit(buffer)
   vim.bo[buffer].buftype = "nofile"
   vim.bo[buffer].bufhidden = "hide"
   vim.bo[buffer].modifiable = true
@@ -1790,6 +1826,14 @@ function M.setup(opts)
     dispatch = dispatch_current,
   })
   conflict.register(actions, conflict.open)
+  diffsplit.setup({
+    run = function(root, args, callback)
+      execute(vim.list_extend({ git_command() }, args), { cwd = root, text = true }, function(result)
+        schedule(function() callback(result) end)
+      end)
+    end,
+  })
+  diffsplit.register(actions, current_item_section)
 
   vim.api.nvim_create_user_command("Git", function(command)
     local args, error_message = split_args(command.args)

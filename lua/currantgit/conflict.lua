@@ -11,64 +11,32 @@
 -- Nothing in this module writes the index or the worktree.
 local M = {}
 
+local panes = require("currantgit.panes")
+
 local deps = {}
 local namespace = vim.api.nvim_create_namespace("currantgit_conflict")
 
-local function hl_color(name, key)
-  return vim.api.nvim_get_hl(0, { name = name, link = false })[key]
-end
-
--- Mixes two 0xRRGGBB colors: `alpha` of `a` over `b`.
-local function blend(a, b, alpha)
-  local result = 0
-  for shift = 0, 16, 8 do
-    local x, y = bit.band(bit.rshift(a, shift), 0xff), bit.band(bit.rshift(b, shift), 0xff)
-    result = result + bit.lshift(math.floor(x * alpha + y * (1 - alpha) + 0.5), shift)
-  end
-  return result
-end
-
--- Ours and theirs get their own tints, mixed from the colorscheme's info
--- (cool) and warning (warm) colors over its background, so they stay apart
--- even where DiffAdd and DiffChange look alike. Everything is `default`, so
--- a user's own definition of any of these groups wins.
+-- Ours and theirs get their own tints (lua/currantgit/panes.lua).
 local function define_highlights()
-  local light = vim.o.background == "light"
-  local bg = hl_color("Normal", "bg") or (light and 0xffffff or 0x1c1c1c)
-  local fg = hl_color("Normal", "fg") or (light and 0x1c1c1c or 0xd0d0d0)
-  local cool = hl_color("DiagnosticInfo", "fg") or hl_color("Function", "fg") or 0x5f87d7
-  local warm = hl_color("DiagnosticWarn", "fg") or hl_color("Constant", "fg") or 0xd7875f
-  local comment = hl_color("Comment", "fg") or blend(fg, bg, 0.5)
-  local groups = {
-    CurrantGitConflictOurs = { bg = blend(cool, bg, 0.2) },
-    CurrantGitConflictOursText = { bg = blend(cool, bg, 0.38) },
-    CurrantGitConflictOursLabel = { fg = cool },
-    CurrantGitConflictTheirs = { bg = blend(warm, bg, 0.2) },
-    CurrantGitConflictTheirsText = { bg = blend(warm, bg, 0.38) },
-    CurrantGitConflictTheirsLabel = { fg = warm },
-    CurrantGitConflictBase = { fg = comment, italic = true },
-    CurrantGitConflictBaseLabel = { fg = comment },
-    CurrantGitConflictMarker = { fg = blend(fg, bg, 0.4) },
-    CurrantGitConflictFiller = { fg = blend(fg, bg, 0.16) },
-    CurrantGitConflictResult = {},
-  }
-  for name, spec in pairs(groups) do
-    spec.default = true
-    vim.api.nvim_set_hl(0, name, spec)
-  end
+  panes.define("CurrantGitConflictColors", function(palette)
+    local groups = {
+      CurrantGitConflictBase = { fg = palette.comment, italic = true },
+      CurrantGitConflictBaseLabel = { fg = palette.comment },
+      CurrantGitConflictMarker = { fg = panes.blend(palette.fg, palette.bg, 0.4) },
+      CurrantGitConflictFiller = { fg = panes.blend(palette.fg, palette.bg, 0.16) },
+      CurrantGitConflictResult = {},
+    }
+    panes.side_groups(groups, "CurrantGitConflictOurs", palette.cool, palette)
+    return panes.side_groups(groups, "CurrantGitConflictTheirs", palette.warm, palette)
+  end)
 end
 
--- In diff mode DiffDelete only paints filler; in a conflict the gap means
--- "the other side has lines here", not "deleted", so it gets a neutral color.
-local FILLER_HIGHLIGHT = "DiffDelete:CurrantGitConflictFiller"
+local FILLER = "CurrantGitConflictFiller"
 local SIDE_HIGHLIGHT = {
   -- The result pane is colored only by CurrantGit's region marks.
-  result = "DiffAdd:CurrantGitConflictResult,DiffChange:CurrantGitConflictResult,"
-    .. "DiffText:CurrantGitConflictResult," .. FILLER_HIGHLIGHT,
-  ours = "DiffAdd:CurrantGitConflictOurs,DiffChange:CurrantGitConflictOurs,DiffText:CurrantGitConflictOursText,"
-    .. FILLER_HIGHLIGHT,
-  theirs = "DiffAdd:CurrantGitConflictTheirs,DiffChange:CurrantGitConflictTheirs,"
-    .. "DiffText:CurrantGitConflictTheirsText," .. FILLER_HIGHLIGHT,
+  result = panes.winhighlight("CurrantGitConflictResult", "CurrantGitConflictResult", FILLER),
+  ours = panes.winhighlight("CurrantGitConflictOurs", "CurrantGitConflictOursText", FILLER),
+  theirs = panes.winhighlight("CurrantGitConflictTheirs", "CurrantGitConflictTheirsText", FILLER),
 }
 
 -- `git help merge-file`: markers are 7 characters by default. A marker is
@@ -115,11 +83,7 @@ function M.parse_markers(lines)
   return regions
 end
 
-local function split_content(content)
-  local lines = vim.split(content or "", "\n", { plain = true })
-  if lines[#lines] == "" then lines[#lines] = nil end
-  return lines
-end
+local split_content = panes.split_content
 
 local function same_sides(stage_region, live)
   return vim.deep_equal(stage_region.ours, live.ours) and vim.deep_equal(stage_region.theirs, live.theirs)
@@ -290,28 +254,8 @@ function M.describe(item)
   return nil
 end
 
-local function find_buffer(name)
-  for _, buffer in ipairs(vim.api.nvim_list_bufs()) do
-    if vim.api.nvim_buf_get_name(buffer) == name then return buffer end
-  end
-end
-
 local function side_buffer(side, path, lines, missing)
-  local name = "currantgit://conflict/" .. side .. "/" .. path
-  local buffer = find_buffer(name)
-  if not buffer then
-    buffer = vim.api.nvim_create_buf(false, true)
-    vim.api.nvim_buf_set_name(buffer, name)
-  end
-  vim.bo[buffer].buftype = "nofile"
-  vim.bo[buffer].bufhidden = "wipe"
-  vim.bo[buffer].readonly = false
-  vim.bo[buffer].modifiable = true
-  vim.api.nvim_buf_set_lines(buffer, 0, -1, false, lines)
-  vim.bo[buffer].modifiable = false
-  vim.bo[buffer].readonly = true
-  vim.bo[buffer].filetype = vim.filetype.match({ filename = path }) or ""
-  vim.b[buffer].currantgit_missing = missing or false
+  local buffer = panes.side_buffer("conflict", side, path, lines, missing)
   vim.b[buffer].currantgit_conflict_pane = side
   return buffer
 end
@@ -369,15 +313,6 @@ local function side_names(root, done)
       try(1)
     end)
   end)
-end
-
-local function fill_with_hatching(window)
-  local entries = {}
-  for entry in (vim.wo[window].fillchars or ""):gmatch("[^,]+") do
-    if not vim.startswith(entry, "diff:") then entries[#entries + 1] = entry end
-  end
-  entries[#entries + 1] = "diff:╱"
-  vim.wo[window].fillchars = table.concat(entries, ",")
 end
 
 -- Colors each live region by side and labels its marker lines at end of
@@ -477,10 +412,7 @@ function M.open(status_item, root)
         vim.wo.winhighlight = SIDE_HIGHLIGHT.theirs
         vim.api.nvim_set_current_win(result_window)
         vim.wo.winhighlight = SIDE_HIGHLIGHT.result
-        for _, window in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
-          vim.api.nvim_win_call(window, function() vim.cmd("diffthis") end)
-          fill_with_hatching(window)
-        end
+        panes.diff_tab()
         decorate(result)
         local group = vim.api.nvim_create_augroup("CurrantGitConflict" .. result, { clear = true })
         vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI" }, {
@@ -502,6 +434,7 @@ function M.open(status_item, root)
           vim.b[buffer].currantgit_root = root
           attach_pane(buffer, deps.dispatch)
         end
+        panes.map_quit({ ours_buffer, result, theirs_buffer }, "currantgit_conflict")
       end)
     end)
     end)
@@ -511,18 +444,18 @@ end
 -- Toggles a read-only stage-1 view under the result pane. It stays out of
 -- diff mode: a fourth diff buffer would only blur the ours/theirs picture.
 function M.toggle_base()
-  local panes = vim.t.currantgit_conflict
-  if not panes then return false end
-  if panes.base and vim.api.nvim_buf_is_valid(panes.base) and vim.fn.bufwinid(panes.base) ~= -1 then
-    vim.api.nvim_win_close(vim.fn.bufwinid(panes.base), true)
-    panes.base = nil
-    vim.t.currantgit_conflict = panes
+  local view = vim.t.currantgit_conflict
+  if not view then return false end
+  if view.base and vim.api.nvim_buf_is_valid(view.base) and vim.fn.bufwinid(view.base) ~= -1 then
+    vim.api.nvim_win_close(vim.fn.bufwinid(view.base), true)
+    view.base = nil
+    vim.t.currantgit_conflict = view
     return true
   end
-  local item = vim.b[panes.result].currantgit_conflict
-  show_stage(panes.root, item, 1, function(lines, missing)
+  local item = vim.b[view.result].currantgit_conflict
+  show_stage(view.root, item, 1, function(lines, missing)
     local origin = vim.api.nvim_get_current_win()
-    local result_window = vim.fn.bufwinid(panes.result)
+    local result_window = vim.fn.bufwinid(view.result)
     if result_window == -1 then return end
     local buffer = side_buffer("base", item.path, lines, missing)
     vim.api.nvim_win_call(result_window, function()
@@ -601,10 +534,6 @@ end
 function M.setup(options)
   deps = options
   define_highlights()
-  vim.api.nvim_create_autocmd("ColorScheme", {
-    group = vim.api.nvim_create_augroup("CurrantGitConflictColors", { clear = true }),
-    callback = define_highlights,
-  })
 end
 
 function M.register(actions, open)

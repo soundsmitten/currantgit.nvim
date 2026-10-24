@@ -51,11 +51,20 @@ available actions remain attached to the item below the heading. On a clean
 repository the "Changes" heading and its sections are omitted entirely rather
 than shown with a zero count.
 
+                                                        *currantgit-quit*
+`gq` quits any CurrantGit surface (status, diff, log, commit, activity, the
+deleted-file view, blame, the diff split, the conflict resolver). A surface
+opened in its own split or tab closes it; otherwise the window returns to
+the buffer the first CurrantGit surface replaced in it (an empty buffer if
+there was none).
+
 On a change item:
 
 <CR>                    Open the file. Deleted files open their last
                         available Git revision read-only.
 d                       Show the file diff.
+D                       Open old | new side by side in a new tab, in native
+                        |diff-mode|. See |currantgit-diff-split|.
 b                       Open the blame companion.
 s                       Stage the file.
 u                       Unstage the file.
@@ -213,6 +222,8 @@ In the resolver:
 gb                      Show or hide the merge base (stage 1) under the
                         result pane. It is read-only and stays out of diff
                         mode.
+gq                      Close the resolver tab from any pane. Unsaved edits
+                        to the result stay in its (hidden) buffer.
 
 Presentation: each side has its own colors in its pane and inside the
 result's conflict blocks, filler lines are hatched (`diff:╱` in
@@ -239,6 +250,35 @@ CurrantGitConflictResult        Diff colors in the result pane (none, so
 
 Markers are assumed to be the default 7 characters; a custom
 `conflict-marker-size` attribute is not read yet.
+
+DIFF SPLIT                                              *currantgit-diff-split*
+
+`D` (`item.diff_split`) on a staged or unstaged change row opens a new tab
+with the old side on the left and the new side on the right, in native
+|diff-mode|, so |]c|, |[c|, |do| and |dp| work. The comparison follows the
+row's section, like `=`:
+
+staged                  `HEAD:<path>` | `:0:<path>`, both read-only.
+unstaged                `:0:<path>` (read-only) | the real worktree file,
+                        which you can edit and save as usual.
+
+Renames and copies read the old side from the source path. A missing side
+(an added file has no HEAD side; a deleted file has no new side) is an empty
+read-only pane whose winbar says "(none)" or "(deleted)". Winbars name each
+side: `HEAD <short sha>`, `index`, `worktree`. Read-only sides are
+`currantgit://diff/<side>/<path>` buffers. Opening the split never writes the
+index or the worktree. Untracked and conflict rows do not offer `D`. `gq`
+in either pane closes the tab; the mapping is removed from the worktree
+file once it leaves the split.
+
+It uses the resolver's presentation: hatched filler and tints mixed from
+DiagnosticWarn (old) and DiagnosticInfo (new), recomputed on |ColorScheme|:
+
+CurrantGitDiffOld               Old-side diff lines (warm tint)
+CurrantGitDiffOldText           Changed text on old-side lines
+CurrantGitDiffNew               New-side diff lines (cool tint)
+CurrantGitDiffNewText           Changed text on new-side lines
+CurrantGitDiffFiller            Hatched filler (faint, instead of DiffDelete)
 
 ===============================================================================
 LOG                                                             *currantgit-log*
