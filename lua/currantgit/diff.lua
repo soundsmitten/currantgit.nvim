@@ -46,6 +46,8 @@ local function unquote_diff_path(text)
   return body
 end
 
+M.unquote_path = unquote_diff_path
+
 function M.parse(stdout, options)
   options = options or {}
   local lines = vim.split(stdout or "", "\n", { plain = true })

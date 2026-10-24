@@ -3,14 +3,15 @@
 ===============================================================================
 CONTENTS                                                     *currantgit-contents*
 
-COMMANDS                                                        |:Git|
-STATUS                                                   *currantgit-status*
-CONFLICTS                                             |currantgit-conflicts|
-LOG                                                         |currantgit-log|
-CONFIGURATION                                       *currantgit-configuration*
-NAVIGATION                                           *currantgit-navigation*
-ACTIONS                                                     *currantgit-actions*
-RPC                                                            *currantgit-rpc*
+COMMANDS                                                |currantgit-commands|
+STATUS                                                    |currantgit-status|
+CONFLICTS                                              |currantgit-conflicts|
+DIFF SPLIT                                            |currantgit-diff-split|
+LOG                                                          |currantgit-log|
+CONFIGURATION                                      |currantgit-configuration|
+NAVIGATION                                            |currantgit-navigation|
+ACTIONS                                                  |currantgit-actions|
+RPC                                                          *currantgit-rpc*
 
 ===============================================================================
 COMMANDS                                                        *currantgit-commands*
@@ -71,7 +72,7 @@ u                       Unstage the file.
 -                       Toggle the file's staged state.
 X                       Discard working-tree changes after confirmation.
 r                       Refresh the status surface.
-g?                      Toggle available status actions as inline buffer text.
+g?                      Open this help section.
 =                       On a staged or unstaged change item, toggle that
                         file's diff inline beneath the row: index-vs-HEAD for
                         a staged item, worktree-vs-index for an unstaged one.
@@ -109,8 +110,11 @@ a warning. A selection that mixes file rows and hunks is refused rather than
 guessed at. If Git rejects a batch (for example, a selected file vanished since
 the last refresh), nothing in that batch is applied.
 
-The discovery line is generated from the same action metadata as the mappings.
-It is a hint, not a second keymap definition.
+Below the status body, an "Available actions" list shows the keys that apply
+to the item under the cursor. It is generated from the same action metadata
+as the mappings, so it is a hint, not a second keymap definition. It is
+ordinary read-only buffer text: it can be searched and yanked, sits outside
+the status folds, and is not rewritten while the cursor is inside it.
 
 Integrations can use `require('currantgit').discovery()` for structured
 `id`, `key`, `label`, and `desc` entries, or
@@ -131,10 +135,9 @@ CurrantGitStatusModified    Modified markers (DiffChange)
 CurrantGitStatusRenamed     Renamed/copied markers (Special)
 CurrantGitStatusUntracked   Untracked markers (Comment)
 CurrantGitPath              Repository-relative paths (Normal)
-CurrantGitAction            Compact discovery line (SpecialKey)
-CurrantGitHelpHeading       Inline-help heading (Title)
-CurrantGitHelpKey           Inline-help keys (SpecialKey)
-CurrantGitHelpDescription   Inline-help descriptions (Comment)
+CurrantGitHelpHeading       "Available actions" heading (Comment)
+CurrantGitHelpKey           Action keys (SpecialKey)
+CurrantGitHelpDescription   Action descriptions (Comment)
 CurrantGitActivitySuccess   Activity success marker (DiagnosticOk)
 CurrantGitActivityFailure   Activity failure marker and exit code (DiagnosticError)
 CurrantGitActivityTime      Activity timestamps (Comment)
@@ -143,9 +146,22 @@ CurrantGitActivityCommand   Activity argv (Statement)
 CurrantGitActivityOutput    Folded command output (Comment)
 CurrantGitActivityStderr    Failed commands' stderr (DiagnosticWarn)
 
-The inline help is ordinary read-only buffer content derived from the same
-contextual action registry as the mappings and compact discovery line. It can
-be searched and yanked; pressing g? again removes it.
+Diff text is syntax highlighted in the changed file's own language wherever
+CurrantGit shows it: the diff surface, inline `=` diffs in status, and the
+commit view. Each hunk's old and new sides are parsed separately with the
+file's treesitter parser, so multi-line strings and comments parse as they do
+in the file. Added and removed rows get line backgrounds. Files with no
+installed treesitter parser keep the backgrounds without token colours.
+Regions over 5000 lines skip token highlighting. On the diff surface these
+highlights replace the regex `diff` syntax ('syntax' is OFF); the filetype
+stays `diff`.
+
+CurrantGitDiffAdd           Added rows (DiffAdd)
+CurrantGitDiffDelete        Removed rows (DiffDelete)
+CurrantGitDiffAddSign       The `+` prefix (Added)
+CurrantGitDiffDeleteSign    The `-` prefix (Removed)
+CurrantGitDiffHunk          `@@` hunk headers (Statement)
+CurrantGitDiffHeader        `diff --git`/`index`/`---`/`+++` lines (Comment)
 
 The diff action opens a read-only diff surface. Hunk headers are native fold
 roots, so |fold-commands| can collapse or reopen each hunk.
@@ -163,11 +179,33 @@ On a deleted item, <CR> opens the last available Git revision in a read-only
 `currantgit://deleted/...` buffer. CurrantGit does not create an empty buffer
 for a path that no longer exists.
 
-The `b` action opens a blame companion split for the selected file. The source
-buffer remains available beside the read-only attribution buffer. `gq` closes
-the blame companion and returns to the source buffer. `<CR>` on an attribution
-row opens its commit view; Ctrl-O returns to blame.
+The `b` action (or `:Git blame [path]`) opens a blame annotation window to
+the left of the source, like fugitive's `:Git blame`. It holds one row per
+source line and does not repeat the source text. The first row of each
+same-commit run shows the short commit ID, author, and author date. The rest
+of the run shows a `│` guide in that commit's colour, so each run reads as
+one block. Each commit gets its own colour (derived from its hash when
+'termguicolors' is set), shared by every run it owns.
 
+The blame and source windows are bound with 'scrollbind' and 'cursorbind',
+so scrolling or moving in either keeps the other aligned. While bound, the
+source window has 'nowrap' and 'nofoldenable', because wrapped or folded
+lines would break the 1:1 alignment. Its original options come back when
+blame closes. Running blame again for the same file, including from the
+blame window, replaces the existing annotation window.
+
+`gq` closes the blame window and returns to the source buffer. `<CR>` on a
+row opens its commit in the blame window, which is unbound and widened while
+it shows the commit. CTRL-O returns to blame and re-binds it.
+
+Blame highlight groups:
+
+CurrantGitBlameHash         Commit IDs without 'termguicolors' (Identifier)
+CurrantGitBlameAuthor       Author names (Normal)
+CurrantGitBlameDate         Author dates (Comment)
+CurrantGitBlameUncommitted  Lines not committed yet (Comment)
+
+                                                    *currantgit-activity*
 `:GitActivity` shows the bounded command ledger, newest first. Each row is
 one Git command: a ✓/✗ status marker, the local HH:MM:SS start time, the
 duration, and argv without the leading `git`. Failed rows end in `exit N`.
@@ -179,9 +217,9 @@ control bytes as `<xx>`, so the buffer never contains raw control bytes.
 
 Each row is an `activity:<n>` item in `b:currantgit_line_items`, where `n`
 is the command's position in the ledger. `<CR>` or `=` toggles the row's
-output (ordinary `zo`/`zc` work too), `r` refreshes, and `g?` shows the
-available actions. It is an inspection surface, not a replacement for the
-status projection.
+output (ordinary `zo`/`zc` work too), `r` refreshes, and `g?` opens this
+help. The "Available actions" list sits below the ledger, as in status.
+It is an inspection surface, not a replacement for the status projection.
 
 ===============================================================================
 CONFLICTS                                                 *currantgit-conflicts*
@@ -317,11 +355,11 @@ the visible rows to those items. Rendered text is never an action target.
                         shared commit view (action ID: `commit.open`).
 r                       Refresh this log with its original arguments and
                         repository. Retain the selected commit when present.
-g?                      Show actions available at the cursor.
+g?                      Open this help section.
 
 Ctrl-O returns from a commit to the log and restores the cursor. Ctrl-Shift-I
-moves forward again. The discovery line, public discovery()/which_key()
-projections, and g? use the action registry. Headers and empty results have no
+moves forward again. The "Available actions" list and the public
+discovery()/which_key() projections use the action registry. Headers and empty results have no
 commit action. Log actions do not stage, reset, or otherwise mutate Git state.
 
 The default limit is 50 commits. Selection arguments supported by this surface:
