@@ -18,6 +18,13 @@ local state = {
   command_log = {},
   log_request = 0,
   status_request = 0,
+  -- Status freshness (see watch_status_freshness): a counter bumped by each
+  -- change event, the last bump per repository root and for all roots, and
+  -- the counter value of the status request in flight, if any.
+  change_tick = 0,
+  changed_at = {},
+  changed_everywhere_at = 0,
+  status_pending_tick = nil,
 }
 
 local open_status
@@ -1598,6 +1605,10 @@ open_status = function(root, mods)
 
   state.status_request = state.status_request + 1
   local request = state.status_request
+  -- Captured before Git runs, so a write that lands while this request is in
+  -- flight still leaves the rendered status stale.
+  local seen_tick = state.change_tick
+  state.status_pending_tick = seen_tick
 
   execute({ git_command(), "status", "--porcelain=v1", "-z", "--branch" }, {
     cwd = root,
@@ -1606,6 +1617,7 @@ open_status = function(root, mods)
     schedule(function()
       if request ~= state.status_request then return end
       if result.code ~= 0 then
+        state.status_pending_tick = nil
         vim.notify("CurrantGit: " .. (result.stderr or "git status failed"), vim.log.levels.ERROR)
         return
       end
@@ -1628,11 +1640,79 @@ open_status = function(root, mods)
           -- Invalidate any single-item expand fetch still in flight from
           -- before this refresh landed -- see rerender_status's comment.
           vim.b[buffer].currantgit_status_generation = (vim.b[buffer].currantgit_status_generation or 0) + 1
+          vim.b[buffer].currantgit_status_tick = seen_tick
+          state.status_pending_tick = nil
           vim.b.currantgit_sections = section_nodes
         end)
       end)
     end)
   end)
+end
+
+-- Status freshness, after fugitive: writing a file inside the repository,
+-- running a shell command, or Neovim regaining focus marks the status stale,
+-- and the status buffer reloads the next time it is entered (or at once, if
+-- it is the current buffer). Entering an unchanged status runs nothing.
+local function mark_changed(root)
+  state.change_tick = state.change_tick + 1
+  if root then
+    state.changed_at[root] = state.change_tick
+  else
+    state.changed_everywhere_at = state.change_tick
+  end
+end
+
+local function status_is_stale(buffer)
+  local root = vim.b[buffer].currantgit_root
+  if vim.b[buffer].currantgit_title ~= "status" or not root then return false end
+  local changed = math.max(state.changed_everywhere_at, state.changed_at[root] or 0)
+  local seen = math.max(vim.b[buffer].currantgit_status_tick or 0, state.status_pending_tick or 0)
+  return changed > seen
+end
+
+local function refresh_current_status_if_stale()
+  local buffer = vim.api.nvim_get_current_buf()
+  if not status_is_stale(buffer) then return end
+  -- Deferred so a render that is itself entering the buffer finishes (and
+  -- records its tick) first. Only in normal mode: a re-render would drop a
+  -- visual selection; the status stays stale and refreshes on the next enter.
+  vim.schedule(function()
+    if vim.api.nvim_get_current_buf() == buffer and status_is_stale(buffer)
+      and vim.api.nvim_get_mode().mode == "n" then
+      open_status(vim.b[buffer].currantgit_root)
+    end
+  end)
+end
+
+local function inside(path, root)
+  local real_path, real_root = path and vim.uv.fs_realpath(path), vim.uv.fs_realpath(root)
+  return real_path ~= nil and real_root ~= nil
+    and (real_path .. "/"):sub(1, #real_root + 1) == real_root .. "/"
+end
+
+local function watch_status_freshness()
+  local group = vim.api.nvim_create_augroup("CurrantGitStatusFreshness", { clear = true })
+  vim.api.nvim_create_autocmd("BufWritePost", {
+    group = group,
+    callback = function(args)
+      local status = vim.fn.bufnr("currantgit://status")
+      local root = status >= 0 and vim.api.nvim_buf_is_valid(status) and vim.b[status].currantgit_root
+      if root and inside(vim.api.nvim_buf_get_name(args.buf), root) then
+        mark_changed(root)
+      end
+    end,
+  })
+  vim.api.nvim_create_autocmd({ "FocusGained", "ShellCmdPost", "ShellFilterPost" }, {
+    group = group,
+    callback = function()
+      mark_changed(nil)
+      refresh_current_status_if_stale()
+    end,
+  })
+  vim.api.nvim_create_autocmd({ "BufEnter", "TabEnter" }, {
+    group = group,
+    callback = refresh_current_status_if_stale,
+  })
 end
 
 local function run_git(args, mods)
@@ -1968,6 +2048,7 @@ function M.setup(opts)
   vim.api.nvim_create_user_command("GitActivity", function()
     open_activity()
   end, {})
+  watch_status_freshness()
   state.configured = true
   return M
 end

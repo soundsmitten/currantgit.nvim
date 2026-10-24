@@ -197,6 +197,13 @@ these, see [`decisions/`](decisions/).
 
 ## Neovim / test harness
 
+- **While the default `vim.ui.select` prompt is waiting for an answer,
+  `nvim_get_mode()` reports `{ mode = "c", blocking = false }`, not
+  `blocking = true`.** The default implementation uses `inputlist()`. An
+  embedder (tests/e2e) that waits for `blocking` before answering will time
+  out. Wait for mode `c`, then type the choice (`1<CR>`). Verified on
+  Neovim 0.12.4.
+
 - **A valid buffer ID does not make a saved cursor or window view valid after
   that buffer is reused.** A refreshed status, diff, or log projection may
   contain fewer or shorter lines than it did when `winsaveview()` and
