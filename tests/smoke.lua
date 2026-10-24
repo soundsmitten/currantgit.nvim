@@ -249,7 +249,14 @@ assert(action_ids["item.toggle"], "change is missing the toggle action")
 assert(action_ids["item.discard"], "unstaged change is missing the discard action")
 assert(not action_ids["item.unstage"], "unstaged change should not expose unstage")
 assert(action_ids["surface.refresh"], "surface is missing the refresh action")
-assert_contains(vim.api.nvim_buf_get_lines(0, 0, -1, false), "Actions:")
+-- The contextual action list is always rendered as buffer text: there is
+-- no separate compact one-liner that g? expands.
+vim.api.nvim_exec_autocmds("CursorMoved", { buffer = 0 })
+lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
+assert_contains(lines, "Available actions")
+for _, line in ipairs(lines) do
+  assert(not line:find("^Actions:"), "the compact one-line discovery bar should be gone")
+end
 
 local status_buffer = vim.api.nvim_get_current_buf()
 local status_namespace = vim.api.nvim_create_namespace("currantgit_status")
@@ -263,53 +270,61 @@ for _, group in ipairs({
   "CurrantGitCount",
   "CurrantGitStatusModified",
   "CurrantGitPath",
-  "CurrantGitAction",
+  "CurrantGitHelpHeading",
+  "CurrantGitHelpKey",
 }) do
   assert(status_groups[group], "status projection is missing highlight group " .. group)
 end
 
-local help_mapping = vim.fn.maparg("g?", "n", false, true)
-assert(help_mapping.callback, "status help mapping was not registered")
-local notified = false
-local original_notify = vim.notify
-vim.notify = function() notified = true end
-help_mapping.callback()
-vim.notify = original_notify
-assert(not notified, "status help should render in the buffer instead of notifying")
-lines = vim.api.nvim_buf_get_lines(status_buffer, 0, -1, false)
-assert_contains(lines, "Available actions")
-assert_contains(lines, "s   stage")
+local function action_row(key, desc)
+  return "^" .. vim.pesc(key) .. "%s+" .. vim.pesc(desc) .. "$"
+end
+local function has_line(buffer_lines, pattern)
+  for _, line in ipairs(buffer_lines) do
+    if line:find(pattern) then return true end
+  end
+  return false
+end
+assert(has_line(lines, action_row("s", "stage")), "action list should show the stage key and description")
 local help_line = vim.fn.search("Available actions", "nw")
-assert(help_line > 0, "status help should be searchable buffer text")
-assert(vim.fn.foldlevel(help_line) == 0, "status help should remain outside status folds")
-assert(vim.b[status_buffer].currantgit_line_items[vim.api.nvim_win_get_cursor(0)[1]].id == current_item.id,
-  "opening help changed semantic item targeting")
+assert(help_line > 0, "action list should be searchable buffer text")
+assert(vim.fn.foldlevel(help_line) == 0, "action list should remain outside status folds")
+-- Keys are padded to one column so descriptions line up (`g?` is wider
+-- than `s`).
+local description_columns = {}
+for _, line in ipairs(lines) do
+  local key, gap = line:match("^(%S+)(%s+)%S")
+  if key and (key == "s" or key == "g?" or key == "r") then
+    description_columns[#description_columns + 1] = #key + #gap
+  end
+end
+assert(#description_columns >= 3, "expected s, r and g? rows in the action list")
+for _, column in ipairs(description_columns) do
+  assert(column == description_columns[1], "action descriptions should share one column")
+end
 
--- Moving the cursor into the open help region should not collapse it: the
--- footer has no line item, and a CursorMoved-triggered discovery refresh
--- there must not treat "no item" as a reason to shrink the footer back to
--- its single-line default while the user is reading/yanking help text.
-local help_line_count_before_move = #lines
+-- Moving the cursor into the action list must not rewrite it out from under
+-- the cursor: those rows have no item, and recomputing for "no item" would
+-- shrink the list while the user is reading or yanking it.
+local line_count_before_move = #lines
 vim.api.nvim_win_set_cursor(0, { help_line, 0 })
 vim.api.nvim_exec_autocmds("CursorMoved", { buffer = status_buffer })
-local lines_with_cursor_in_help = vim.api.nvim_buf_get_lines(status_buffer, 0, -1, false)
-assert(#lines_with_cursor_in_help == help_line_count_before_move,
-  "moving the cursor into open help should not collapse the footer")
+assert(#vim.api.nvim_buf_get_lines(status_buffer, 0, -1, false) == line_count_before_move,
+  "moving the cursor into the action list should not rewrite it")
 goto_item("tracked.txt")
 
--- A refresh (e.g. after staging/unstaging, or a plain `r`) must not
--- silently close help the user explicitly opened.
-local help_refresh_mapping = vim.fn.maparg("r", "n", false, true)
-assert(help_refresh_mapping.callback, "refresh mapping was not registered")
-wait_for_status_refresh(function() help_refresh_mapping.callback() end)
-assert(vim.b[status_buffer].currantgit_help_open == true, "a status refresh should not close previously-open help")
-lines = vim.api.nvim_buf_get_lines(status_buffer, 0, -1, false)
-assert_contains(lines, "Available actions")
-goto_item("tracked.txt")
-
+-- g? opens the real :help section for this surface instead of toggling text.
+local help_mapping = vim.fn.maparg("g?", "n", false, true)
+assert(help_mapping.callback, "status help mapping was not registered")
+local status_window = vim.api.nvim_get_current_win()
 help_mapping.callback()
-lines = vim.api.nvim_buf_get_lines(status_buffer, 0, -1, false)
-for _, line in ipairs(lines) do assert(line ~= "Available actions", "second g? should close inline help") end
+assert(vim.bo.buftype == "help", "g? should open Neovim help")
+assert(vim.api.nvim_get_current_line():find("*currantgit-status*", 1, true),
+  "g? on status should land on the currantgit-status help tag")
+vim.cmd("helpclose")
+assert(vim.api.nvim_get_current_win() == status_window, "closing help should return to status")
+assert(vim.b.currantgit_line_items[vim.api.nvim_win_get_cursor(0)[1]].id == current_item.id,
+  "opening help changed semantic item targeting")
 
 local diff_mapping = vim.fn.maparg("d", "n", false, true)
 assert(diff_mapping.callback, "diff mapping was not registered")
@@ -520,9 +535,17 @@ do
   assert(open_mapping.callback, "activity <CR> mapping was not registered")
   open_mapping.callback()
   assert(vim.fn.foldclosed(succeeded.line + 1) == succeeded.line, "<CR> should close the row's output again")
-  vim.fn.maparg("g?", "n", false, true).callback()
+  -- nvim_win_set_cursor does not fire CursorMoved; real cursor motion does,
+  -- and that is what refreshes the always-on action list.
+  vim.api.nvim_exec_autocmds("CursorMoved", { buffer = 0 })
   assert_contains(vim.api.nvim_buf_get_lines(0, 0, -1, false), "Show or hide this command's output")
+  local activity_window = vim.api.nvim_get_current_win()
   vim.fn.maparg("g?", "n", false, true).callback()
+  assert(vim.bo.buftype == "help", "g? on activity should open Neovim help")
+  assert(vim.api.nvim_get_current_line():find("*currantgit-activity*", 1, true),
+    "g? on activity should land on the currantgit-activity help tag")
+  vim.cmd("helpclose")
+  assert(vim.api.nvim_get_current_win() == activity_window, "closing help should return to activity")
   local refresh_mapping = vim.fn.maparg("r", "n", false, true)
   assert(refresh_mapping.callback, "activity refresh mapping was not registered")
   -- Clear the projection so only a real re-render can restore it.
@@ -633,5 +656,6 @@ dofile(vim.env.CURRANTGIT_ROOT .. "/tests/diffsplit.lua")
 assert_no_async_errors()
 dofile(vim.env.CURRANTGIT_ROOT .. "/tests/quit.lua")
 assert_no_async_errors()
+dofile(vim.env.CURRANTGIT_ROOT .. "/tests/help.lua")
 print("CurrantGit smoke: ok")
 vim.cmd("qa!")

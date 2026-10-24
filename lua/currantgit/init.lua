@@ -6,6 +6,7 @@ local blame = require("currantgit.blame")
 local conflict = require("currantgit.conflict")
 local diffsplit = require("currantgit.diffsplit")
 local diff = require("currantgit.diff")
+local diff_syntax = require("currantgit.diff_syntax")
 local git_log = require("currantgit.log")
 local navigation = require("currantgit.navigation")
 local rpc = require("currantgit.rpc")
@@ -31,10 +32,11 @@ local combined_hunk_patch
 local set_buffer
 local attach_diff
 local attach_log
-local toggle_status_help
 local attach_activity
+local open_help
 
 local status_namespace = vim.api.nvim_create_namespace("currantgit_status")
+local blame_namespace = vim.api.nvim_create_namespace("currantgit_blame")
 
 local function define_highlights()
   local links = {
@@ -48,8 +50,7 @@ local function define_highlights()
     CurrantGitStatusRenamed = "Special",
     CurrantGitStatusUntracked = "Comment",
     CurrantGitPath = "Normal",
-    CurrantGitAction = "SpecialKey",
-    CurrantGitHelpHeading = "Title",
+    CurrantGitHelpHeading = "Comment",
     CurrantGitHelpKey = "SpecialKey",
     CurrantGitHelpDescription = "Comment",
     CurrantGitActivitySuccess = "DiagnosticOk",
@@ -59,6 +60,16 @@ local function define_highlights()
     CurrantGitActivityCommand = "Statement",
     CurrantGitActivityOutput = "Comment",
     CurrantGitActivityStderr = "DiagnosticWarn",
+    CurrantGitDiffAdd = "DiffAdd",
+    CurrantGitDiffDelete = "DiffDelete",
+    CurrantGitDiffAddSign = "Added",
+    CurrantGitDiffDeleteSign = "Removed",
+    CurrantGitDiffHunk = "Statement",
+    CurrantGitDiffHeader = "Comment",
+    CurrantGitBlameHash = "Identifier",
+    CurrantGitBlameAuthor = "Normal",
+    CurrantGitBlameDate = "Comment",
+    CurrantGitBlameUncommitted = "Comment",
   }
   for group, target in pairs(links) do
     vim.api.nvim_set_hl(0, group, { default = true, link = target })
@@ -232,49 +243,31 @@ local function update_discovery(buffer)
   end
   local item = current_item(buffer)
   local available = actions.discovery(item, { buffer = buffer })
-  local labels = {}
-  for _, action in ipairs(available) do
-    if action.key then
-      labels[#labels + 1] = action.key .. " " .. action.label
-    end
-  end
-  local discovery = #labels > 0 and "Actions: " .. table.concat(labels, "   ") or "Actions: r refresh   g? help"
   local footer_start = vim.b[buffer].currantgit_footer_start
   if type(footer_start) ~= "number" then
     footer_start = vim.api.nvim_buf_line_count(buffer)
     vim.b[buffer].currantgit_footer_start = footer_start
   end
-  local lines = { discovery }
+  local key_width = 0
+  for _, action in ipairs(available) do
+    key_width = math.max(key_width, vim.fn.strdisplaywidth(action.key))
+  end
+  local lines = { "Available actions" }
   local highlights = {
-    { line = footer_start, start_col = 0, end_col = #discovery, group = "CurrantGitAction" },
+    { line = footer_start, start_col = 0, end_col = #lines[1], group = "CurrantGitHelpHeading" },
   }
-  if vim.b[buffer].currantgit_help_open then
-    lines[#lines + 1] = ""
-    lines[#lines + 1] = "Available actions"
+  for _, action in ipairs(available) do
+    local padding = string.rep(" ", key_width - vim.fn.strdisplaywidth(action.key) + 3)
+    local help_line = action.key .. padding .. action.desc
+    lines[#lines + 1] = help_line
+    local line = footer_start + #lines - 1
+    highlights[#highlights + 1] = { line = line, start_col = 0, end_col = #action.key, group = "CurrantGitHelpKey" }
     highlights[#highlights + 1] = {
-      line = footer_start + #lines - 1,
-      start_col = 0,
-      end_col = #lines[#lines],
-      group = "CurrantGitHelpHeading",
+      line = line,
+      start_col = #action.key + #padding,
+      end_col = #help_line,
+      group = "CurrantGitHelpDescription",
     }
-    for _, action in ipairs(available) do
-      if action.key then
-        local help_line = action.key .. "   " .. action.desc
-        lines[#lines + 1] = help_line
-        highlights[#highlights + 1] = {
-          line = footer_start + #lines - 1,
-          start_col = 0,
-          end_col = #action.key,
-          group = "CurrantGitHelpKey",
-        }
-        highlights[#highlights + 1] = {
-          line = footer_start + #lines - 1,
-          start_col = #action.key + 3,
-          end_col = #help_line,
-          group = "CurrantGitHelpDescription",
-        }
-      end
-    end
   end
   local line_count = vim.api.nvim_buf_line_count(buffer)
   set_modifiable(buffer, function()
@@ -290,14 +283,27 @@ local function update_discovery(buffer)
   apply_status_highlights(buffer, highlights, footer_start - 1)
 end
 
-toggle_status_help = function(buffer)
-  local title = vim.api.nvim_buf_is_valid(buffer) and vim.b[buffer].currantgit_title
-  if title ~= "status" and title ~= "activity" then
-    return false
+local HELP_TAGS = {
+  status = "currantgit-status",
+  log = "currantgit-log",
+  activity = "currantgit-activity",
+}
+
+-- Opens this surface's section of doc/currantgit.txt. Plugin managers
+-- normally generate doc/tags; when nothing has (a bare `rtp` checkout),
+-- generate them once for CurrantGit's own doc directory and retry rather
+-- than failing with E149.
+open_help = function(buffer)
+  local tag = HELP_TAGS[vim.b[buffer].currantgit_title] or "currantgit.txt"
+  if pcall(vim.cmd.help, tag) then return end
+  local doc = vim.api.nvim_get_runtime_file("doc/currantgit.txt", false)[1]
+  if doc then
+    pcall(vim.cmd.helptags, vim.fn.fnameescape(vim.fn.fnamemodify(doc, ":h")))
   end
-  vim.b[buffer].currantgit_help_open = not vim.b[buffer].currantgit_help_open
-  update_discovery(buffer)
-  return true
+  local ok, error_message = pcall(vim.cmd.help, tag)
+  if not ok then
+    vim.notify("CurrantGit: " .. tostring(error_message), vim.log.levels.ERROR)
+  end
 end
 
 local function literal_pathspecs(paths)
@@ -399,17 +405,8 @@ local function action_context(buffer)
     buffer = buffer,
     root = root,
     refresh = refresh,
-    help = function(item)
-      if toggle_status_help(buffer) then return end
-      -- Pass the full context (not just `buffer`) so this fallback matches
-      -- what actions.discovery receives everywhere else the action
-      -- registry is consulted, in case an is_available predicate ever
-      -- inspects context fields beyond `buffer`.
-      local labels = {}
-      for _, available_action in ipairs(actions.discovery(item, context)) do
-        labels[#labels + 1] = available_action.key .. " " .. available_action.label
-      end
-      vim.notify("CurrantGit: " .. table.concat(labels, "   "), vim.log.levels.INFO)
+    help = function()
+      open_help(buffer)
     end,
     open = function(item)
       navigation.update(0)
@@ -572,6 +569,10 @@ open_deleted = function(item, root)
   end)
 end
 
+-- Window options that must hold on the source while blame is bound to it:
+-- wrapped or folded source lines would no longer map 1:1 onto blame rows.
+local BLAME_SOURCE_OPTIONS = { "scrollbind", "cursorbind", "wrap", "foldenable" }
+
 open_blame = function(path, root)
   local error_message
   if not root then root, error_message = repository_root() end
@@ -580,6 +581,13 @@ open_blame = function(path, root)
     return
   end
   local source_buffer = vim.api.nvim_get_current_buf()
+  -- Blaming from a blame window means "re-blame its source": work from the
+  -- source window, or `:edit` below would replace the annotations instead.
+  local blamed_source = vim.b[source_buffer].currantgit_blame_source
+  if blamed_source and vim.fn.bufwinid(blamed_source) ~= -1 then
+    vim.api.nvim_set_current_win(vim.fn.bufwinid(blamed_source))
+    source_buffer = blamed_source
+  end
   if vim.fn.fnamemodify(vim.api.nvim_buf_get_name(source_buffer), ":.") ~= path then
     vim.cmd("edit " .. vim.fn.fnameescape(root .. "/" .. path))
     source_buffer = vim.api.nvim_get_current_buf()
@@ -594,11 +602,32 @@ open_blame = function(path, root)
         return
       end
       local rows = blame.parse(result.stdout or "")
-      vim.cmd("botright vsplit")
+      local lines, highlights = blame.render(rows)
+      -- Mirrors fugitive: re-blaming replaces the old annotation window
+      -- rather than stacking another one (and the old buffer's name would
+      -- otherwise make nvim_buf_set_name fail with E95).
+      local name = "currantgit://blame/" .. path
+      local existing = vim.fn.bufnr(name)
+      if existing > 0 and vim.api.nvim_buf_is_valid(existing) then
+        vim.api.nvim_buf_delete(existing, { force = true })
+      end
+      local source_window = vim.fn.bufwinid(source_buffer)
+      if source_window == -1 then
+        vim.notify("CurrantGit: blame source is no longer shown in a window", vim.log.levels.WARN)
+        return
+      end
+      vim.api.nvim_set_current_win(source_window)
+      vim.cmd("leftabove vsplit")
       local buffer = vim.api.nvim_create_buf(false, true)
       vim.api.nvim_set_current_buf(buffer)
-      vim.api.nvim_buf_set_name(buffer, "currantgit://blame/" .. path)
-      vim.api.nvim_buf_set_lines(buffer, 0, -1, false, blame.render(rows))
+      vim.api.nvim_buf_set_name(buffer, name)
+      vim.api.nvim_buf_set_lines(buffer, 0, -1, false, lines)
+      for _, highlight in ipairs(highlights) do
+        vim.api.nvim_buf_set_extmark(buffer, blame_namespace, highlight.line - 1, highlight.start_col, {
+          end_col = highlight.end_col,
+          hl_group = highlight.group,
+        })
+      end
       vim.bo[buffer].buftype = "nofile"
       vim.bo[buffer].bufhidden = "hide"
       vim.bo[buffer].modifiable = false
@@ -608,6 +637,61 @@ open_blame = function(path, root)
       vim.b[buffer].currantgit_blame_rows = rows
       vim.b[buffer].currantgit_blame_source = source_buffer
       vim.b[buffer].currantgit_root = root
+      local width = 1
+      for _, line in ipairs(lines) do width = math.max(width, vim.fn.strdisplaywidth(line)) end
+
+      local saved_source
+      local function bind()
+        local blame_window = vim.fn.bufwinid(buffer)
+        local bound_source = vim.fn.bufwinid(source_buffer)
+        -- Already bound (the BufWinEnter from creating this window lands
+        -- after the initial bind): re-saving now would capture our own
+        -- overrides as the source's "original" options.
+        if saved_source or blame_window == -1 or bound_source == -1 then return end
+        saved_source = { window = bound_source }
+        for _, option in ipairs(BLAME_SOURCE_OPTIONS) do
+          saved_source[option] = vim.wo[bound_source][option]
+        end
+        vim.wo[bound_source].wrap = false
+        vim.wo[bound_source].foldenable = false
+        local wo = vim.wo[blame_window]
+        wo.number = false
+        wo.relativenumber = false
+        wo.wrap = false
+        wo.list = false
+        wo.foldenable = false
+        wo.foldcolumn = "0"
+        wo.signcolumn = "no"
+        wo.cursorline = true
+        wo.winfixwidth = true
+        vim.api.nvim_win_set_width(blame_window, width + 1)
+        -- Align before binding: scrollbind preserves whatever offset the
+        -- windows had when it was turned on.
+        local view = vim.api.nvim_win_call(bound_source, vim.fn.winsaveview)
+        vim.api.nvim_win_call(blame_window, function()
+          vim.fn.winrestview({ topline = view.topline, lnum = view.lnum, col = 0 })
+        end)
+        for _, window in ipairs({ blame_window, bound_source }) do
+          vim.wo[window].scrollbind = true
+          vim.wo[window].cursorbind = true
+        end
+        vim.api.nvim_win_call(bound_source, function() vim.cmd("syncbind") end)
+      end
+      local function unbind()
+        local blame_window = vim.fn.bufwinid(buffer)
+        if blame_window ~= -1 then
+          vim.wo[blame_window].scrollbind = false
+          vim.wo[blame_window].cursorbind = false
+          vim.wo[blame_window].winfixwidth = false
+        end
+        if saved_source and vim.api.nvim_win_is_valid(saved_source.window) then
+          for _, option in ipairs(BLAME_SOURCE_OPTIONS) do
+            vim.wo[saved_source.window][option] = saved_source[option]
+          end
+        end
+        saved_source = nil
+      end
+
       vim.keymap.set("n", "<CR>", function()
         local row = vim.b[buffer].currantgit_blame_rows[vim.api.nvim_win_get_cursor(0)[1]]
         if row then open_commit(row.commit, vim.b[buffer].currantgit_root) end
@@ -617,17 +701,37 @@ open_blame = function(path, root)
         silent = true,
         desc = "Close blame and return",
       })
+      -- The blame window can show other buffers (<CR> opens a commit in
+      -- it; CTRL-O comes back), so binding follows the blame buffer in and
+      -- out of its window instead of being set once.
       local group = vim.api.nvim_create_augroup("CurrantGitBlame" .. buffer, { clear = true })
-      vim.api.nvim_create_autocmd("CursorMoved", {
+      vim.api.nvim_create_autocmd("BufWinLeave", {
         group = group,
         buffer = buffer,
         callback = function()
-          local row = vim.b[buffer].currantgit_blame_rows[vim.api.nvim_win_get_cursor(0)[1]]
-          if row and vim.api.nvim_buf_is_valid(source_buffer) then
-            vim.api.nvim_win_set_cursor(0, { row.line, 0 })
+          unbind()
+          -- Opening a commit in the annotation-width window would be
+          -- unreadable; give it a normal share of the screen back.
+          local blame_window = vim.fn.bufwinid(buffer)
+          if blame_window ~= -1 and #vim.api.nvim_tabpage_list_wins(0) > 1 then
+            vim.api.nvim_win_set_width(blame_window, math.floor(vim.o.columns / 2))
           end
         end,
       })
+      vim.api.nvim_create_autocmd("BufWinEnter", {
+        group = group,
+        buffer = buffer,
+        callback = function() vim.schedule(bind) end,
+      })
+      vim.api.nvim_create_autocmd("BufWipeout", {
+        group = group,
+        buffer = buffer,
+        callback = function()
+          unbind()
+          pcall(vim.api.nvim_del_augroup_by_id, group)
+        end,
+      })
+      bind()
       navigation.visit(0)
     end)
   end)
@@ -650,7 +754,10 @@ open_commit = function(commit, root)
         return
       end
       navigation.update(0)
-      set_buffer(vim.split(vim.trim(result.stdout or ""), "\n", { plain = true }), {}, "commit/" .. commit:sub(1, 8), {}, root)
+      local lines = vim.split(vim.trim(result.stdout or ""), "\n", { plain = true })
+      local buffer = set_buffer(lines, {}, "commit/" .. commit:sub(1, 8), {}, root)
+      diff_syntax.clear(buffer)
+      diff_syntax.apply(buffer, 0, lines)
       navigation.visit(0)
     end)
   end)
@@ -816,10 +923,10 @@ local function attach_status(buffer)
     group = group,
     buffer = buffer,
     callback = function()
-      -- Skip while the cursor is inside the footer/help region itself: it
-      -- has no line item, so recomputing discovery there would collapse
-      -- open inline help (whose text the user may be reading or yanking)
-      -- back down to the single default line out from under the cursor.
+      -- Skip while the cursor is inside the action list itself: it has no
+      -- line item, so recomputing there would shrink the list to the
+      -- item-less actions out from under the cursor while the user is
+      -- reading or yanking it.
       local footer_start = vim.b[buffer].currantgit_footer_start
       local cursor_line = vim.api.nvim_win_get_cursor(0)[1]
       if type(footer_start) == "number" and cursor_line >= footer_start then
@@ -920,14 +1027,13 @@ set_buffer = function(lines, items, title, line_items, root, fold_levels, highli
     vim.b[buffer].currantgit_footer_start = #lines
   end
   if title == "status" then
-    -- Preserve an already-open help panel across a reused buffer's refresh
-    -- (`r`, stage/unstage/discard, ...): defaulting unconditionally to
-    -- false here closes help on every refresh, contradicting the
-    -- documented "pressing g? again removes it" toggle contract.
-    vim.b[buffer].currantgit_help_open = vim.b[buffer].currantgit_help_open or false
     vim.b[buffer].currantgit_status_highlights = highlights or {}
     apply_status_highlights(buffer, highlights)
     vim.b[buffer].currantgit_item_sections = (status_extra and status_extra.item_sections) or {}
+    diff_syntax.clear(buffer)
+    for _, region in ipairs((status_extra and status_extra.diff_regions) or {}) do
+      diff_syntax.apply(buffer, region.start_row, region.lines, { path = region.path })
+    end
     if status_extra and status_extra.parsed then
       vim.b[buffer].currantgit_status_parsed = status_extra.parsed
     end
@@ -1073,7 +1179,12 @@ open_diff_args = function(args, root, mods)
       end
       local lines, fold_levels, line_items, hunks = diff.parse(result.stdout or "", { mode = mode, path = path })
       navigation.update(0)
-      set_buffer(lines, hunks, "diff", line_items, root, fold_levels, nil, mods)
+      local buffer = set_buffer(lines, hunks, "diff", line_items, root, fold_levels, nil, mods)
+      -- Our extmarks replace the regex `diff` syntax; keeping both would
+      -- paint whole added/removed lines one colour over the tokens.
+      vim.bo[buffer].syntax = "OFF"
+      diff_syntax.clear(buffer)
+      diff_syntax.apply(buffer, 0, lines, { path = path })
       vim.b.currantgit_diff_hunks = hunks
       vim.b.currantgit_diff_args = args
       navigation.visit(0)
@@ -1247,6 +1358,7 @@ local function render_status_body(header, branch, sections, items, expanded)
   local section_nodes = {}
   local highlights = {}
   local item_sections = {}
+  local diff_regions = {}
   local function highlight(line, start_col, end_col, group)
     highlights[#highlights + 1] = {
       line = line,
@@ -1320,6 +1432,7 @@ local function render_status_body(header, branch, sections, items, expanded)
             -- instead of merging into the flat run of sibling item rows.
             fold_levels[#lines] = ">2"
             local offset = #lines
+            diff_regions[#diff_regions + 1] = { start_row = offset, lines = expansion.lines, path = item.path }
             for diff_line, text in ipairs(expansion.lines) do
               lines[offset + diff_line] = text
               fold_levels[offset + diff_line] = offset_fold_level(expansion.fold_levels[diff_line], 2)
@@ -1340,7 +1453,7 @@ local function render_status_body(header, branch, sections, items, expanded)
   end
   lines[#lines + 1] = ""
   fold_levels[#lines] = 0
-  return lines, line_items, fold_levels, section_nodes, highlights, item_sections
+  return lines, line_items, fold_levels, section_nodes, highlights, item_sections, diff_regions
 end
 
 -- Which section (staged/unstaged/untracked/conflicts) the row under the
@@ -1378,10 +1491,11 @@ local function rerender_status(buffer)
   local expanded = vim.b[buffer].currantgit_expanded or {}
   local window = vim.fn.bufwinid(buffer)
   local cursor = window ~= -1 and vim.api.nvim_win_get_cursor(window)
-  local lines, line_items, fold_levels, section_nodes, highlights, item_sections =
+  local lines, line_items, fold_levels, section_nodes, highlights, item_sections, diff_regions =
     render_status_body(parsed.header, parsed.branch, parsed.sections, parsed.items, expanded)
   set_buffer(lines, parsed.items, "status", line_items, parsed.root, fold_levels, highlights, nil, {
     item_sections = item_sections,
+    diff_regions = diff_regions,
     expanded = expanded,
     parsed = parsed,
   })
@@ -1503,10 +1617,11 @@ open_status = function(root, mods)
         if request ~= state.status_request then return end
         conflict.annotate(root, sections.conflicts.items, function()
           if request ~= state.status_request then return end
-          local lines, line_items, fold_levels, section_nodes, highlights, item_sections =
+          local lines, line_items, fold_levels, section_nodes, highlights, item_sections, diff_regions =
             render_status_body(header, branch, sections, items, expanded)
           local buffer = set_buffer(lines, items, "status", line_items, root, fold_levels, highlights, mods, {
             item_sections = item_sections,
+            diff_regions = diff_regions,
             expanded = expanded,
             parsed = { header = header, branch = branch, sections = sections, items = items, root = root },
           })
@@ -1599,7 +1714,9 @@ function M.git(args, mods)
   elseif args[1] == "diff" then
     open_diff_args(args, nil, mods)
   elseif args[1] == "blame" then
-    local path = args[2] or vim.fn.expand("%:~:.")
+    local blamed_source = vim.b.currantgit_blame_source
+    local path = args[2] or (blamed_source and vim.api.nvim_buf_is_valid(blamed_source)
+      and vim.fn.fnamemodify(vim.api.nvim_buf_get_name(blamed_source), ":~:.")) or vim.fn.expand("%:~:.")
     if path == "" or vim.bo.filetype == "currantgit" then
       vim.notify("CurrantGit: :Git blame needs a file path from a source buffer", vim.log.levels.WARN)
       return
