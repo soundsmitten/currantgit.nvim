@@ -149,7 +149,10 @@ end
 
 -- Moves the cursor with a real `/` search, then confirms where it landed.
 function Session:search(text)
-  self:keys("gg/\\V" .. text:gsub("\\", "\\\\"):gsub("<", "<lt>") .. "<CR>")
+  -- \V keeps the text literal; "\" and the "/" that would end the search are
+  -- escaped, and "<" is spelled <lt> so nvim_input does not read a key name.
+  local pattern = text:gsub("\\", "\\\\"):gsub("/", "\\/"):gsub("<", "<lt>")
+  self:keys("gg/\\V" .. pattern .. "<CR>")
   self:wait("cursor on " .. text, function()
     return self:line():find(text, 1, true) ~= nil and self:mode().mode == "n"
   end)

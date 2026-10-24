@@ -34,6 +34,32 @@ local function has_line(s, needle)
   return false
 end
 
+local function conflict_fixture(s)
+  s:write("f.txt", "a\nb\nc\n")
+  s:git({ "add", "." })
+  s:git({ "commit", "-q", "-m", "base" })
+  s:git({ "checkout", "-q", "-b", "side" })
+  s:write("f.txt", "a\nTHEIRS\nc\n")
+  s:git({ "commit", "-q", "-am", "theirs" })
+  s:git({ "checkout", "-q", "main" })
+  s:write("f.txt", "a\nOURS\nc\n")
+  s:git({ "commit", "-q", "-am", "ours" })
+  s:git({ "merge", "-q", "side" }, { allow_failure = true })
+end
+
+local function status_row(s, path)
+  for _, line in ipairs(s:lines()) do
+    if line:find(path, 1, true) and line:match("^%S+ ") then return line end
+  end
+end
+
+-- Number of `git status` runs the child has made so far, read from its own
+-- command ledger: the observable cost of a refresh.
+local function status_runs(s)
+  return s:eval([[#vim.tbl_filter(function(entry) return entry.argv[2] == "status" end,
+    require("currantgit").command_log())]])
+end
+
 return {
   {
     name = "status: s stages and u unstages the file under the cursor",
@@ -204,6 +230,102 @@ return {
       s:wait("back on status", function()
         return s:eval("vim.api.nvim_get_current_win()") == status_window and s:surface() == "status"
       end)
+    end,
+  },
+  {
+    name = "refresh: status catches up after :w in the resolver and gq back",
+    fixture = conflict_fixture,
+    run = function(s)
+      s:open_status()
+      equal(status_row(s, "f.txt"), "UU f.txt  0/1", "fixture starts unresolved")
+      s:search("f.txt")
+      s:keys("<CR>")
+      s:wait("resolver result pane", function() return s:eval("vim.b.currantgit_conflict_pane") == "result" end)
+      s:settle()
+      s:keys("gg]xco")
+      s:wait("region taken", function() return not table.concat(s:lines(), "\n"):find("<<<<<<<", 1, true) end)
+      s:keys(":w<CR>")
+      s:wait("file saved", function() return s:read("f.txt") == "a\nOURS\nc\n" end)
+      s:keys("gq")
+      s:wait("back on status", function() return s:surface() == "status" end)
+      -- No `r`: entering the status buffer after a write must refresh it.
+      s:wait("count refreshed to 1/1", function() return status_row(s, "f.txt") == "UU f.txt  1/1" end)
+    end,
+  },
+  {
+    name = "refresh: a file written elsewhere shows up when you return to status",
+    fixture = function(s)
+      worktree_fixture(s)
+      s:write("clean.txt", "clean\n")
+      s:git({ "add", "clean.txt" })
+      s:git({ "commit", "-q", "-m", "add clean" })
+    end,
+    run = function(s)
+      s:open_status()
+      expect(not status_row(s, "clean.txt"), "clean.txt starts clean")
+      s:keys(":edit clean.txt<CR>")
+      s:wait("editing clean.txt", function() return s:eval("vim.fn.expand('%:t')") == "clean.txt" end)
+      s:keys("Goedited<Esc>:w<CR>")
+      s:wait("clean.txt written", function() return s:read("clean.txt") == "clean\nedited\n" end)
+      s:keys(":buffer #<CR>")
+      s:wait("status lists clean.txt", function()
+        return s:surface() == "status" and status_row(s, "clean.txt") == "M clean.txt"
+      end)
+    end,
+  },
+  {
+    name = "refresh: changes made outside Neovim show up on FocusGained",
+    fixture = worktree_fixture,
+    run = function(s)
+      s:open_status()
+      s:git({ "add", "tracked.txt" })
+      -- An embedded child gets no real focus events; fire the one a UI sends.
+      s:keys(":doautocmd FocusGained<CR>")
+      s:wait("tracked.txt moved to staged", function()
+        local lines = s:lines()
+        return vim.fn.index(lines, "Staged changes (2)") >= 0
+      end)
+    end,
+  },
+  {
+    name = "refresh: a focus change mid-selection keeps the visual selection",
+    fixture = worktree_fixture,
+    run = function(s)
+      s:open_status()
+      local before = status_runs(s)
+      s:search("M discard.txt")
+      s:keys("Vj")
+      s:wait("visual selection", function() return s:mode().mode == "V" end)
+      s:git({ "add", "untracked.txt" })
+      -- <Cmd> fires the event without leaving visual mode, as a real focus
+      -- change would.
+      s:keys("<Cmd>doautocmd FocusGained<CR>")
+      s:wait("event handled", function() return s:eval("vim.fn.mode()") == "V" end)
+      vim.wait(300)
+      equal(s:mode().mode, "V", "the selection must survive")
+      equal(status_runs(s), before, "no refresh while selecting")
+      s:keys("<Esc>")
+      s:wait("normal mode", function() return s:mode().mode == "n" end)
+      s:keys(":edit tracked.txt<CR>:buffer #<CR>")
+      s:wait("refreshed on the next enter", function()
+        return s:surface() == "status" and status_row(s, "untracked.txt") == "A untracked.txt"
+      end)
+    end,
+  },
+  {
+    name = "refresh: entering status with nothing changed runs no git status",
+    fixture = worktree_fixture,
+    run = function(s)
+      s:open_status()
+      local before = status_runs(s)
+      s:keys(":edit tracked.txt<CR>")
+      s:wait("editing tracked.txt", function() return s:eval("vim.fn.expand('%:t')") == "tracked.txt" end)
+      s:keys(":buffer #<CR>")
+      s:wait("back on status", function() return s:surface() == "status" end)
+      s:keys(":tabnew<CR>:tabprevious<CR>")
+      s:wait("back on status tab", function() return s:surface() == "status" and s:eval("vim.fn.tabpagenr()") == 1 end)
+      s:settle()
+      equal(status_runs(s), before, "re-entering an unchanged status must not re-run git status")
     end,
   },
   {

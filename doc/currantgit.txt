@@ -52,6 +52,14 @@ available actions remain attached to the item below the heading. On a clean
 repository the "Changes" heading and its sections are omitted entirely rather
 than shown with a zero count.
 
+Status keeps itself current the way fugitive's does. Writing a file inside
+the repository (|BufWritePost|), running a shell command (|ShellCmdPost|), or
+Neovim regaining focus (|FocusGained|) marks it stale, and it reloads the
+next time you enter it (|BufEnter|, |TabEnter|), or at once if it is the
+current buffer. Entering a status that has not changed runs no Git command.
+It never reloads in the middle of a visual selection; it waits for the next
+enter instead. `r` still refreshes on demand.
+
                                                         *currantgit-quit*
 `gq` quits any CurrantGit surface (status, diff, log, commit, activity, the
 deleted-file view, blame, the diff split, the conflict resolver). A surface
