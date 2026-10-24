@@ -222,7 +222,7 @@ contract and diff checks
   → model tests
   → Git fixtures
   → clean headless Neovim (`scripts/smoke-nvim`)
-  → scripted keypresses
+  → scripted keypresses (`scripts/e2e`)
   → manual visual smoke
   → release/repository handoff
 ```
@@ -238,6 +238,20 @@ new slices land; do not replace it with an opaque all-in-one command.
 The harness must exercise mapped actions, not only the functions beneath them.
 Async callback errors are collected and asserted as test failures. A green
 command-level test is insufficient if pressing the actual key can still fail.
+
+`scripts/e2e` is the scripted-keypress rung. Each scenario in
+`tests/e2e/scenarios.lua` gets its own Git fixture and its own
+`nvim --embed --headless` child. Keys go in through `nvim_input`, so
+mappings, prompts, counts and 'timeoutlen' behave as they do for a user. Git
+state is read back with the driver's own `git`, not the plugin's model.
+`scripts/e2e <text>` runs only the scenarios whose name contains `<text>`. Add a
+scenario for each user journey a slice adds. A focused smoke assertion still
+belongs in `tests/` for the detailed cases.
+
+`tests/help.lua` keeps help honest: `doc/currantgit.txt` must build with
+`:helptags`, every `|currantgit-*|` link must resolve, and every `:Git*`
+command and every buffer-local mapping on a CurrantGit surface needs a help
+entry line. A mention in prose does not count.
 
 Help is part of the same loop. Add or update `doc/currantgit.txt` when a public
 command, action, configuration option, or CurrantGit-specific interaction

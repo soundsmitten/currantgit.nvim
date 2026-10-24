@@ -44,6 +44,7 @@ AGENTS.md                this guide
 lua/currantgit/         semantic core bootstrap
 plugin/                  Neovim command loading
 tests/                   clean harness and smoke assertions
+tests/e2e/               keystroke-driven journeys in a separate embedded Neovim
 scripts/                 validation and development entry points
 ```
 
@@ -128,6 +129,7 @@ For this repository, the expected development loop will eventually be:
 ```sh
 scripts/test                 # focused and full automated checks
 scripts/smoke-nvim           # clean headless Neovim smoke path
+scripts/e2e                  # real keystrokes into an embedded Neovim per scenario
 ```
 
 The first harness now exists. Extend these scripts as the implementation grows,
