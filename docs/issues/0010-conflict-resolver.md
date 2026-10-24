@@ -62,6 +62,24 @@ show *what each side changed relative to base*, not just two blobs.
 Region choices edit the result buffer only (undoable with `u`); nothing
 touches the index until `mark_resolved`.
 
+## Verified Git behavior (git 2.50.1, fixture repo)
+
+Checked before slice 3 relies on them:
+
+- `AA` (add/add) has stages 2 and 3 only; `git show :1:<path>` fails with
+  "is in the index, but not at stage 1". Base must be optional everywhere.
+- Modify/delete shows `UD` (deleted by them) with stages 1 and 2 only. The
+  `DU` mirror should lack stage 2; not yet run, so cover it in the fixture.
+  A missing side gets no pane content and no take action, not an empty blob.
+- `git checkout -m -- :(literal)<path>` recreates stages 1-3 and the marker
+  file even after the file was `git add`ed (resolve-undo), and overwrites the
+  worktree file. `conflict.restore` therefore always confirms.
+- Recreated markers are labelled `ours`/`theirs`/`base`, not the original
+  `HEAD`/branch labels, so the marker parser must not depend on labels.
+- `git checkout --conflict=zdiff3 -- <path>` re-emits a file in a given
+  style; fixtures can use it to cover `merge`/`diff3`/`zdiff3` from one
+  conflict.
+
 ## Slices
 
 1. Read-only: parse conflicts into items from index stages + worktree
