@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# End-to-end journeys: real keystrokes into a separate embedded Neovim per
+# scenario, Git state checked from outside. Optional arg filters by name.
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+
+CURRANTGIT_ROOT="$repo_root" nvim --clean --headless -l "$repo_root/tests/e2e/run.lua" "$@"
