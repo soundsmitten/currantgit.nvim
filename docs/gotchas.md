@@ -10,6 +10,17 @@ these, see [`decisions/`](decisions/).
 
 ## Git
 
+- **`git rebase -i` todo lines are `pick <sha> # <subject>` in Git 2.50**,
+  with the subject as a comment. Older Git wrote `pick <sha> <subject>`.
+  Don't parse the subject out of a todo line; if you must match one, allow
+  both forms. Verified with `GIT_SEQUENCE_EDITOR` printing the todo.
+
+- **Staging during an open commit message does not change that commit.**
+  `git commit` takes no `index.lock` while its editor is open (git 2.50.1):
+  `git add` from elsewhere succeeds, the commit records the index as it was
+  when the editor opened, and the newly staged file stays staged for the
+  next commit. Verified in tests/e2e/commit_edges.lua's adversarial run.
+
 - **`git status --short` renders a rename as one line**, `R  old -> new`.
   Slicing the path out of that line naively gives you the literal string
   `"old -> new"`, not a path. Use `git status --porcelain=v1 -z` instead —
@@ -196,6 +207,14 @@ these, see [`decisions/`](decisions/).
   content.
 
 ## Neovim / test harness
+
+- **A deferred RPC request (`nvim_exec_lua`, `nvim_buf_get_lines`, ...) hangs
+  while the target Neovim is blocked waiting for input**, e.g. after an
+  unmapped operator such as `ca` left it in operator-pending mode
+  (`nvim_get_mode()` returns `{ mode = "no", blocking = true }`). `:help
+  api-fast` documents it: deferred requests are queued with normal input.
+  Check `nvim_get_mode()` (a fast call) before a deferred request, as
+  `tests/e2e/harness.lua` does, or a test hangs instead of failing.
 
 - **While the default `vim.ui.select` prompt is waiting for an answer,
   `nvim_get_mode()` reports `{ mode = "c", blocking = false }`, not
