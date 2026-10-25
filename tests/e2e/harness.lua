@@ -87,8 +87,15 @@ function Session:stop()
   end
 end
 
--- Observation only: evaluates a Lua expression in the child.
+-- Observation only: evaluates a Lua expression in the child. nvim_exec_lua is
+-- a deferred request, and deferred requests wait while the child is blocked
+-- on input (a pending operator, a getchar()), so check first and fail instead
+-- of hanging (`:help api-fast`; nvim_get_mode is fast).
 function Session:eval(expression, ...)
+  local mode = self:mode()
+  if mode.blocking then
+    error(("child is waiting for more input (mode %q)"):format(mode.mode), 2)
+  end
   return vim.rpcrequest(self.channel, "nvim_exec_lua", "return " .. expression, { ... })
 end
 

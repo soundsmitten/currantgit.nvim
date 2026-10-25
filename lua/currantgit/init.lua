@@ -7,6 +7,7 @@ local conflict = require("currantgit.conflict")
 local diffsplit = require("currantgit.diffsplit")
 local diff = require("currantgit.diff")
 local diff_syntax = require("currantgit.diff_syntax")
+local git_editor = require("currantgit.git_editor")
 local git_log = require("currantgit.log")
 local navigation = require("currantgit.navigation")
 local rpc = require("currantgit.rpc")
@@ -41,6 +42,8 @@ local attach_diff
 local attach_log
 local attach_activity
 local open_help
+local mark_changed
+local refresh_current_status_if_stale
 
 local status_namespace = vim.api.nvim_create_namespace("currantgit_status")
 local blame_namespace = vim.api.nvim_create_namespace("currantgit_blame")
@@ -124,6 +127,10 @@ local function execute(args, opts, callback, input)
   local started = vim.loop.hrtime()
   local process_opts = vim.deepcopy(opts)
   if input then process_opts.stdin = true end
+  -- Any Git command that wants an editor (commit, merge, rebase -i ...) gets
+  -- one in this Neovim. Only here: this executor never blocks the main loop,
+  -- and the editor needs it free (docs/decisions/0015).
+  process_opts.env = vim.tbl_extend("force", process_opts.env or {}, git_editor.env())
   local process = vim.system(args, process_opts, function(result)
     record_command(args, opts.cwd, result, started)
     callback(result)
@@ -375,10 +382,13 @@ local function action_context(buffer)
     }, function(result)
       schedule(function()
         if result.code ~= 0 then
-          vim.notify("CurrantGit: " .. (result.stderr or "git action failed"), vim.log.levels.ERROR)
+          -- Some refusals ("nothing to commit") go to stdout, not stderr.
+          local message = vim.trim(result.stderr or "")
+          if message == "" then message = vim.trim(result.stdout or "") end
+          vim.notify("CurrantGit: " .. (message ~= "" and message or "git action failed"), vim.log.levels.ERROR)
           return
         end
-        callback()
+        callback(result)
       end)
     end, input)
   end
@@ -481,6 +491,16 @@ local function action_context(buffer)
     end,
     commit = function(item)
       open_commit(item.commit, root)
+    end,
+    -- `git commit` with the given options. The message, if Git wants one, is
+    -- edited in a split through git_editor; Git decides everything else.
+    run_commit = function(args)
+      action(vim.list_extend({ "commit" }, args), function(result)
+        local summary = vim.split(vim.trim(result.stdout or ""), "\n", { plain = true })[1]
+        if summary and summary ~= "" then vim.notify(summary) end
+        mark_changed(root)
+        refresh_current_status_if_stale()
+      end)
     end,
     discard = function(item)
       vim.ui.select({ "Discard", "Cancel" }, {
@@ -922,6 +942,9 @@ local function attach_status(buffer)
   map("n", "r", function() dispatch_current(buffer, "surface.refresh") end)
   map("n", "g?", function() dispatch_current(buffer, "surface.help") end)
   map("n", "=", function() dispatch_current_key(buffer, "=") end)
+  for _, key in ipairs({ "cc", "ca", "ce", "cw", "cvc", "cva" }) do
+    map("n", key, function() dispatch_current_key(buffer, key) end)
+  end
   for _, key in ipairs({ "s", "u", "-", "X" }) do
     map("x", key, function() dispatch_selection(buffer, key) end)
   end
@@ -1004,12 +1027,15 @@ set_buffer = function(lines, items, title, line_items, root, fold_levels, highli
   if existing_window then
     vim.api.nvim_set_current_tabpage(vim.api.nvim_win_get_tabpage(existing_window))
     vim.api.nvim_set_current_win(existing_window)
-  elseif mods ~= "" then
+  elseif mods ~= "" or vim.b.currantgit_git_editor then
     -- Mirrors fugitive: `:vertical Git`/`:tab Git` open the surface in a
     -- split/tab the same way `:vertical edit`/`:tab edit` would. Only the
     -- top-level :Git command threads a `mods` argument down to here --
     -- internal navigation (refresh, stage, opening a diff from status, ...)
     -- always passes nothing, so it never triggers a split.
+    -- A window editing a message for a running Git command keeps it:
+    -- replacing that buffer would wipe it and end the edit early
+    -- (docs/decisions/0015).
     vim.cmd(mods .. " split")
     vim.w.currantgit_split = true
   end
@@ -1653,7 +1679,7 @@ end
 -- running a shell command, or Neovim regaining focus marks the status stale,
 -- and the status buffer reloads the next time it is entered (or at once, if
 -- it is the current buffer). Entering an unchanged status runs nothing.
-local function mark_changed(root)
+mark_changed = function(root)
   state.change_tick = state.change_tick + 1
   if root then
     state.changed_at[root] = state.change_tick
@@ -1670,7 +1696,7 @@ local function status_is_stale(buffer)
   return changed > seen
 end
 
-local function refresh_current_status_if_stale()
+refresh_current_status_if_stale = function()
   local buffer = vim.api.nvim_get_current_buf()
   if not status_is_stale(buffer) then return end
   -- Deferred so a render that is itself entering the buffer finishes (and
@@ -1697,7 +1723,10 @@ local function watch_status_freshness()
     callback = function(args)
       local status = vim.fn.bufnr("currantgit://status")
       local root = status >= 0 and vim.api.nvim_buf_is_valid(status) and vim.b[status].currantgit_root
-      if root and inside(vim.api.nvim_buf_get_name(args.buf), root) then
+      local path = vim.api.nvim_buf_get_name(args.buf)
+      -- Git's own files (COMMIT_EDITMSG, the rebase todo) are written while
+      -- a Git command is still running; that command refreshes when it ends.
+      if root and inside(path, root) and not inside(path, vim.fs.joinpath(root, ".git")) then
         mark_changed(root)
       end
     end,
@@ -1727,6 +1756,7 @@ local function run_git(args, mods)
     text = true,
   }, function(result)
     schedule(function()
+      mark_changed(root)
       local output = result.stdout or ""
       if result.code ~= 0 then
         output = (result.stderr or "git command failed") .. "\n" .. output
@@ -1833,6 +1863,30 @@ function M.setup(opts)
       return true
     end,
   })
+  -- Fugitive's commit keys. Offered on status only; Git itself refuses what
+  -- cannot work (nothing staged, nothing to amend) and changes nothing.
+  for _, commit in ipairs({
+    { id = "commit.create", key = "cc", label = "commit", args = {} },
+    { id = "commit.amend", key = "ca", label = "amend", desc = "amend the last commit and edit its message", args = { "--amend" } },
+    { id = "commit.extend", key = "ce", label = "extend", desc = "amend the last commit, keep its message", args = { "--amend", "--no-edit" } },
+    { id = "commit.reword", key = "cw", label = "reword", desc = "reword the last commit (staged changes stay staged)", args = { "--amend", "--only" } },
+    { id = "commit.create_verbose", key = "cvc", label = "commit -v", desc = "commit, with the diff shown under the message", args = { "-v" } },
+    { id = "commit.amend_verbose", key = "cva", label = "amend -v", desc = "amend, with the diff shown under the message", args = { "--amend", "-v" } },
+  }) do
+    actions.register({
+      id = commit.id,
+      label = commit.label,
+      key = commit.key,
+      desc = commit.desc,
+      is_available = function(context)
+        return context.buffer ~= nil and vim.b[context.buffer].currantgit_title == "status"
+      end,
+      run = function(context)
+        context.run_commit(vim.deepcopy(commit.args))
+        return true
+      end,
+    })
+  end
   actions.register({
     id = "commit.open",
     label = "open commit",

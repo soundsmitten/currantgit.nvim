@@ -5,6 +5,7 @@ CONTENTS                                                     *currantgit-content
 
 COMMANDS                                                |currantgit-commands|
 STATUS                                                    |currantgit-status|
+COMMITTING                                              |currantgit-commit|
 CONFLICTS                                              |currantgit-conflicts|
 DIFF SPLIT                                            |currantgit-diff-split|
 LOG                                                          |currantgit-log|
@@ -80,6 +81,12 @@ u                       Unstage the file.
 -                       Toggle the file's staged state.
 X                       Discard working-tree changes after confirmation.
 r                       Refresh the status surface.
+cc                      Commit. See |currantgit-commit|.
+ca                      Amend the last commit and edit its message.
+ce                      Amend the last commit, keeping its message.
+cw                      Reword the last commit; staged changes stay staged.
+cvc  cva                Commit or amend with the diff shown below the
+                        message (`git commit -v`).
 g?                      Open this help section.
 =                       On a staged or unstaged change item, toggle that
                         file's diff inline beneath the row: index-vs-HEAD for
@@ -228,6 +235,35 @@ is the command's position in the ledger. `<CR>` or `=` toggles the row's
 output (ordinary `zo`/`zc` work too), `r` refreshes, and `g?` opens this
 help. The "Available actions" list sits below the ledger, as in status.
 It is an inspection surface, not a replacement for the status projection.
+
+===============================================================================
+COMMITTING                                                   *currantgit-commit*
+
+The commit keys in status (`cc`, `ca`, `ce`, `cw`, `cvc`, `cva`) match
+fugitive's. They run `git commit` with the matching options and let Git do
+the rest: when Git wants a message, it opens in a split here.
+
+This works for every `:Git` command that needs an editor, not only commits:
+`:Git commit`, `:Git merge` without `-m`, `:Git tag -a`, `:Git rebase -i`
+(the todo list opens as a `gitrebase` buffer). CurrantGit sets `GIT_EDITOR`
+and `GIT_SEQUENCE_EDITOR` for the Git commands it runs, which take precedence
+over `core.editor`, `sequence.editor`, `$VISUAL` and `$EDITOR`. Git still
+writes the file, so its templates, merge messages, `commit.template` and
+hooks all apply as usual.
+
+Finish by closing the buffer. Git reads the file as it is on disk at that
+moment, exactly as with a terminal editor:
+
+:wq                     Save and hand the message to Git.
+:q!                     Discard your edits. Git sees its own template, which
+                        has no message, and aborts the commit.
+
+An empty message (only comments) aborts a commit, and an empty todo list
+aborts a rebase. Both are Git's own rules. There is no `:cq`: to abort, close
+without a message. After a commit, the first line of Git's output (for
+example `[main 1a2b3c4] Subject`) is shown and status refreshes. Git's
+refusals, such as "nothing to commit", are shown as errors and change
+nothing.
 
 ===============================================================================
 CONFLICTS                                                 *currantgit-conflicts*
