@@ -2,9 +2,17 @@
 
 ## Status
 
-Proposed. Touches index/worktree state: follows the Git safety doctrine and
+Slices 1-3 implemented (iterations 0025, 0027 and 0034); slice 4 not
+started. Touches index/worktree state: follows the Git safety doctrine and
 the two-phase implementation/adversarial-validation workflow in
 `docs/development.md`.
+
+Slice 3 shipped with these keys, which differ from the table below: `rr`,
+`rs`, `ra` for continue/skip/abort (fugitive's rebase keys, mapped only
+while an operation is in progress), `R` for restore, and `s`/`-` as mark
+resolved with a marker guard. Still open from this issue: fugitive's `re`
+(edit the rebase todo), `2X`/`3X` (checkout --ours/--theirs), and showing
+the merged branch's name rather than its short SHA in the header.
 
 ## Goal
 

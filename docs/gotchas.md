@@ -10,6 +10,26 @@ these, see [`decisions/`](decisions/).
 
 ## Git
 
+- **`git restore --staged <path>` on an unmerged path exits 0 and silently
+  "resolves" it**: all three conflict stages are replaced by HEAD's version
+  at stage 0, the markers stay in the worktree, and the file leaves `git
+  status`'s unmerged list (shows as ` M`). A status toggle that unstages
+  anything with a non-space X code did exactly this on `UU` rows. Conflict
+  XY codes are not a staged/unstaged pair; never route them to unstage.
+  Verified on git 2.50.1; regression in tests/e2e/operations.lua.
+
+- **Conflict markers are not always 7 characters.** The
+  `conflict-marker-size` attribute (`git help gitattributes`) sets their
+  length, longer or shorter. Read it with `git check-attr -z
+  conflict-marker-size -- <paths>` (literal paths; output `path NUL attr NUL
+  value NUL`, value `unspecified` means 7) instead of hardcoding 7. A
+  hardcoded check let a file with 9-character markers be staged.
+
+- **`git cherry-pick --continue` and `git revert --continue` commit without
+  opening an editor**, unlike `rebase --continue` and `merge --continue`
+  (git 2.50.1, `GIT_EDITOR` set to a recorder: never called).
+
+
 - **`git rebase -i` todo lines are `pick <sha> # <subject>` in Git 2.50**,
   with the subject as a comment. Older Git wrote `pick <sha> <subject>`.
   Don't parse the subject out of a todo line; if you must match one, allow

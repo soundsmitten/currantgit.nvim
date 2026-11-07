@@ -10,6 +10,7 @@ local diff_syntax = require("currantgit.diff_syntax")
 local git_editor = require("currantgit.git_editor")
 local git_log = require("currantgit.log")
 local navigation = require("currantgit.navigation")
+local operation = require("currantgit.operation")
 local rpc = require("currantgit.rpc")
 
 local state = {
@@ -26,6 +27,8 @@ local state = {
   changed_at = {},
   changed_everywhere_at = 0,
   status_pending_tick = nil,
+  -- `git rev-parse --absolute-git-dir` per repository root.
+  git_dirs = {},
 }
 
 local open_status
@@ -44,6 +47,7 @@ local attach_activity
 local open_help
 local mark_changed
 local refresh_current_status_if_stale
+local with_git_dir
 
 local status_namespace = vim.api.nvim_create_namespace("currantgit_status")
 local blame_namespace = vim.api.nvim_create_namespace("currantgit_blame")
@@ -52,6 +56,7 @@ local function define_highlights()
   local links = {
     CurrantGitRepository = "Title",
     CurrantGitBranch = "Identifier",
+    CurrantGitOperation = "WarningMsg",
     CurrantGitHeading = "Directory",
     CurrantGitCount = "Number",
     CurrantGitStatusAdded = "DiffAdd",
@@ -363,6 +368,81 @@ combined_hunk_patch = function(hunks)
   return table.concat(lines, "\n") .. "\n"
 end
 
+-- The loaded buffer showing <root>/<path>, if any.
+local function buffer_for(root, path)
+  local target = vim.uv.fs_realpath(vim.fs.joinpath(root, path))
+  if not target then return nil end
+  for _, buffer in ipairs(vim.api.nvim_list_bufs()) do
+    local name = vim.api.nvim_buf_is_loaded(buffer) and vim.api.nvim_buf_get_name(buffer) or ""
+    if name ~= "" and vim.uv.fs_realpath(name) == target then return buffer end
+  end
+end
+
+-- Each path's conflict marker length: the `conflict-marker-size` attribute
+-- (`git help gitattributes`), 7 when unspecified. `callback(nil)` if Git
+-- could not say. Paths here are literal, not pathspecs (`git help check-attr`).
+local function marker_sizes(root, paths, callback)
+  if #paths == 0 then
+    callback({})
+    return
+  end
+  execute(vim.list_extend({ git_command(), "check-attr", "-z", "conflict-marker-size", "--" }, vim.deepcopy(paths)),
+    { cwd = root, text = true }, function(result)
+      schedule(function()
+        if result.code ~= 0 then
+          callback(nil)
+          return
+        end
+        local sizes = {}
+        local fields = vim.split(result.stdout or "", "\0", { plain = true })
+        for index = 1, #fields - 2, 3 do
+          sizes[fields[index]] = tonumber(fields[index + 2]) or 7
+        end
+        callback(sizes)
+      end)
+    end)
+end
+
+-- Why a conflicted file must not be marked resolved (`git add`) yet, or nil.
+-- Reads the file on disk at the moment of the key press, since that is what
+-- Git would stage. Any line that opens or closes a conflict region at the
+-- file's marker size blocks it, even one whose partner was deleted; bare
+-- "=======" lines do not (Markdown headings). Binary and deleted sides have
+-- no markers: Git decides.
+local function conflict_blocker(root, path, size)
+  local buffer = buffer_for(root, path)
+  if buffer and vim.bo[buffer].modified then
+    return path .. " has unsaved changes; write it first (Git stages the file on disk)"
+  end
+  if not size then
+    return "could not read the conflict-marker-size attribute for " .. path
+  end
+  local file = io.open(vim.fs.joinpath(root, path), "rb")
+  if not file then return nil end
+  local content = file:read("*a")
+  file:close()
+  if content:find("\0", 1, true) then return nil end
+  local open, close = string.rep("<", size), string.rep(">", size)
+  local number = 0
+  for line in (content .. "\n"):gmatch("(.-)\r?\n") do
+    number = number + 1
+    local run = line:sub(1, size)
+    local rest = line:sub(size + 1, size + 1)
+    if (run == open or run == close) and (rest == "" or rest == " ") then
+      return ("%s still has conflict markers (line %d); resolve them, or :Git add to stage it anyway"):format(path, number)
+    end
+  end
+end
+
+-- Re-reads unmodified buffers of a file Git just rewrote, without the
+-- W11 "file changed" prompt :checktime would raise.
+local function reload_unmodified(root, path)
+  local buffer = buffer_for(root, path)
+  if buffer and not vim.bo[buffer].modified then
+    vim.api.nvim_buf_call(buffer, function() vim.cmd("silent edit!") end)
+  end
+end
+
 local function action_context(buffer)
   local root = vim.b[buffer].currantgit_root
   local function action(args, callback, input)
@@ -446,7 +526,21 @@ local function action_context(buffer)
       -- PATHSPECS). Without it, a real filename containing `*`, `?`, or `[`
       -- is treated as a glob and can silently apply this action to a
       -- completely different, unrelated file.
-      action({ "add", "--", ":(literal)" .. item.path }, function() open_status(root) end)
+      local function add()
+        action({ "add", "--", ":(literal)" .. item.path }, function() open_status(root) end)
+      end
+      if item.kind ~= "conflict-file" then
+        add()
+        return
+      end
+      marker_sizes(root, { item.path }, function(sizes)
+        local reason = conflict_blocker(root, item.path, sizes and sizes[item.path])
+        if reason then
+          vim.notify("CurrantGit: " .. reason, vim.log.levels.WARN)
+          return
+        end
+        add()
+      end)
     end,
     unstage = function(item)
       action({ "restore", "--staged", "--", ":(literal)" .. item.path }, function() open_status(root) end)
@@ -491,6 +585,54 @@ local function action_context(buffer)
     end,
     commit = function(item)
       open_commit(item.commit, root)
+    end,
+    -- `git <operation> --<verb>` for the operation status shows. Re-read at
+    -- the key press: if it is no longer the one on screen, refuse.
+    operation = function(verb)
+      local shown = vim.b[buffer].currantgit_operation
+      with_git_dir(root, function(git_dir)
+        local current = operation.read(git_dir)
+        if not current or not operation.same(current, shown) then
+          vim.notify("CurrantGit: the operation in progress changed since status was drawn; press r and try again",
+            vim.log.levels.WARN)
+          return
+        end
+        local function run()
+          action({ current.kind, "--" .. verb }, function()
+            mark_changed(root)
+            refresh_current_status_if_stale()
+          end)
+        end
+        if verb ~= "abort" then
+          run()
+          return
+        end
+        local confirm = "Abort " .. current.kind
+        vim.ui.select({ confirm, "Cancel" }, {
+          prompt = operation.describe(current) .. ". Abort it? Its resolutions and staged changes are lost.",
+        }, function(choice)
+          if choice == confirm then run() end
+        end)
+      end)
+    end,
+    -- Recreates the file's original conflict (`git checkout -m`), dropping
+    -- edits to it, after confirmation.
+    restore_conflict = function(item)
+      local open = buffer_for(root, item.path)
+      if open and vim.bo[open].modified then
+        vim.notify("CurrantGit: " .. item.path .. " has unsaved changes; write or discard them first",
+          vim.log.levels.WARN)
+        return
+      end
+      vim.ui.select({ "Restore conflict", "Cancel" }, {
+        prompt = "Recreate the conflict in " .. item.path .. "? Your edits to it are lost.",
+      }, function(choice)
+        if choice ~= "Restore conflict" then return end
+        action({ "checkout", "-m", "--", ":(literal)" .. item.path }, function()
+          reload_unmodified(root, item.path)
+          open_status(root)
+        end)
+      end)
     end,
     -- `git commit` with the given options. The message, if Git wants one, is
     -- edited in a split through git_editor; Git decides everything else.
@@ -823,8 +965,8 @@ local function selected_items(buffer)
   local seen, items = {}, {}
   for line = first, last do
     local item = line_items[line]
-    if type(item) == "table" and (item.kind == "change" or item.kind == "hunk") then
-      local key = item.kind == "change" and ("change\0" .. item.path)
+    if type(item) == "table" and (item.kind == "change" or item.kind == "conflict-file" or item.kind == "hunk") then
+      local key = item.kind ~= "hunk" and (item.kind .. "\0" .. item.path)
         or ("hunk\0" .. tostring(item.mode) .. "\0" .. tostring(item.patch))
       if not seen[key] then
         seen[key] = true
@@ -856,7 +998,7 @@ local function dispatch_selection(buffer, key)
   local context = action_context(buffer)
   local files, hunks = {}, {}
   for _, item in ipairs(items) do
-    if item.kind == "change" then files[#files + 1] = item else hunks[#hunks + 1] = item end
+    if item.kind == "change" or item.kind == "conflict-file" then files[#files + 1] = item else hunks[#hunks + 1] = item end
   end
   if #files > 0 and #hunks > 0 then
     vim.notify("CurrantGit: selection mixes files and hunks; select one or the other", vim.log.levels.WARN)
@@ -883,13 +1025,25 @@ local function dispatch_selection(buffer, key)
     if #chosen > 0 then context.apply_hunks(chosen, key == "u") end
     return
   end
+  local root = vim.b[buffer].currantgit_root
+  local conflicted = {}
+  for _, item in ipairs(files) do
+    if item.kind == "conflict-file" then conflicted[#conflicted + 1] = item.path end
+  end
+  marker_sizes(root, conflicted, function(sizes)
+  -- Conflicted files with markers left (or unsaved) are never staged.
+  local function blocked(item)
+    local reason = item.kind == "conflict-file" and conflict_blocker(root, item.path, sizes and sizes[item.path])
+    if reason then vim.notify("CurrantGit: skipped " .. reason, vim.log.levels.WARN) end
+    return reason
+  end
   local function partition(id)
     local chosen, skipped = {}, {}
     for _, item in ipairs(files) do
-      if is_available(id, context, item) then
-        chosen[#chosen + 1] = item.path
-      else
+      if not is_available(id, context, item) then
         skipped[#skipped + 1] = item.path
+      elseif not (id == "item.stage" and blocked(item)) then
+        chosen[#chosen + 1] = item.path
       end
     end
     report_skipped(skipped, id .. " unavailable")
@@ -909,9 +1063,9 @@ local function dispatch_selection(buffer, key)
     -- unstages, everything else stages. At most two Git calls.
     local to_stage, to_unstage = {}, {}
     for _, item in ipairs(files) do
-      if item.status ~= "??" and item.status:sub(1, 1) ~= " " then
+      if item.kind ~= "conflict-file" and item.status ~= "??" and item.status:sub(1, 1) ~= " " then
         to_unstage[#to_unstage + 1] = item.path
-      else
+      elseif not blocked(item) then
         to_stage[#to_stage + 1] = item.path
       end
     end
@@ -920,6 +1074,7 @@ local function dispatch_selection(buffer, key)
     end
     if #to_unstage > 0 then context.unstage_paths(to_unstage, stage) else stage() end
   end
+  end)
 end
 
 local function attach_status(buffer)
@@ -944,6 +1099,17 @@ local function attach_status(buffer)
   map("n", "=", function() dispatch_current_key(buffer, "=") end)
   for _, key in ipairs({ "cc", "ca", "ce", "cw", "cvc", "cva" }) do
     map("n", key, function() dispatch_current_key(buffer, key) end)
+  end
+  map("n", "R", function() dispatch_current(buffer, "conflict.restore") end)
+  -- Only while an operation is in progress: a permanent `rr` would make
+  -- every plain `r` (refresh) wait out 'timeoutlen'.
+  local op = vim.b[buffer].currantgit_operation
+  for key, id in pairs({ rr = "operation.continue", rs = "operation.skip", ra = "operation.abort" }) do
+    if op and is_available(id, action_context(buffer), nil) then
+      map("n", key, function() dispatch_current(buffer, id) end)
+    else
+      pcall(vim.keymap.del, "n", key, { buffer = buffer })
+    end
   end
   for _, key in ipairs({ "s", "u", "-", "X" }) do
     map("x", key, function() dispatch_selection(buffer, key) end)
@@ -1060,6 +1226,7 @@ set_buffer = function(lines, items, title, line_items, root, fold_levels, highli
     vim.b[buffer].currantgit_footer_start = #lines
   end
   if title == "status" then
+    vim.b[buffer].currantgit_operation = status_extra and status_extra.parsed and status_extra.parsed.operation or nil
     vim.b[buffer].currantgit_status_highlights = highlights or {}
     apply_status_highlights(buffer, highlights)
     vim.b[buffer].currantgit_item_sections = (status_extra and status_extra.item_sections) or {}
@@ -1383,7 +1550,7 @@ end
 -- currantgit_status_parsed) can call this directly to re-render without a
 -- round-trip, which is what makes toggling a single item's inline diff (or
 -- restoring expansion state after a refresh) cheap.
-local function render_status_body(header, branch, sections, items, expanded)
+local function render_status_body(header, branch, sections, items, expanded, op)
   local ui = config.get().ui
   local lines = { header }
   local line_items = {}
@@ -1404,6 +1571,11 @@ local function render_status_body(header, branch, sections, items, expanded)
   if ui.show_branch then
     lines[#lines + 1] = "Branch: " .. (branch ~= "" and branch or "detached")
     highlight(#lines, 0, #lines[#lines], "CurrantGitBranch")
+  end
+  if op then
+    lines[#lines + 1] = operation.describe(op)
+    highlight(#lines, 0, #lines[#lines], "CurrantGitOperation")
+    line_items[#lines] = vim.tbl_extend("force", { id = "operation:" .. op.kind, kind = "operation" }, op)
   end
   highlight(1, 0, #header, "CurrantGitRepository")
   -- Fugitive's status buffer omits a section entirely when it's empty
@@ -1525,7 +1697,7 @@ local function rerender_status(buffer)
   local window = vim.fn.bufwinid(buffer)
   local cursor = window ~= -1 and vim.api.nvim_win_get_cursor(window)
   local lines, line_items, fold_levels, section_nodes, highlights, item_sections, diff_regions =
-    render_status_body(parsed.header, parsed.branch, parsed.sections, parsed.items, expanded)
+    render_status_body(parsed.header, parsed.branch, parsed.sections, parsed.items, expanded, parsed.operation)
   set_buffer(lines, parsed.items, "status", line_items, parsed.root, fold_levels, highlights, nil, {
     item_sections = item_sections,
     diff_regions = diff_regions,
@@ -1619,6 +1791,22 @@ local function refresh_expanded_diffs(root, sections, previous_expanded, done)
   end
 end
 
+-- The repository's git dir, looked up once per root. A linked worktree has
+-- its own (where its MERGE_HEAD and rebase state live).
+with_git_dir = function(root, callback)
+  if state.git_dirs[root] then
+    callback(state.git_dirs[root])
+    return
+  end
+  execute({ git_command(), "rev-parse", "--absolute-git-dir" }, { cwd = root, text = true }, function(result)
+    schedule(function()
+      local git_dir = result.code == 0 and vim.trim(result.stdout or "") or nil
+      if git_dir and git_dir ~= "" then state.git_dirs[root] = git_dir end
+      callback(state.git_dirs[root])
+    end)
+  end)
+end
+
 open_status = function(root, mods)
   local error_message
   if not root then
@@ -1655,13 +1843,16 @@ open_status = function(root, mods)
         if request ~= state.status_request then return end
         conflict.annotate(root, sections.conflicts.items, function()
           if request ~= state.status_request then return end
+          with_git_dir(root, function(git_dir)
+          if request ~= state.status_request then return end
+          local op = operation.read(git_dir)
           local lines, line_items, fold_levels, section_nodes, highlights, item_sections, diff_regions =
-            render_status_body(header, branch, sections, items, expanded)
+            render_status_body(header, branch, sections, items, expanded, op)
           local buffer = set_buffer(lines, items, "status", line_items, root, fold_levels, highlights, mods, {
             item_sections = item_sections,
             diff_regions = diff_regions,
             expanded = expanded,
-            parsed = { header = header, branch = branch, sections = sections, items = items, root = root },
+            parsed = { header = header, branch = branch, sections = sections, items = items, root = root, operation = op },
           })
           -- Invalidate any single-item expand fetch still in flight from
           -- before this refresh landed -- see rerender_status's comment.
@@ -1669,6 +1860,7 @@ open_status = function(root, mods)
           vim.b[buffer].currantgit_status_tick = seen_tick
           state.status_pending_tick = nil
           vim.b.currantgit_sections = section_nodes
+          end)
         end)
       end)
     end)
@@ -1863,6 +2055,47 @@ function M.setup(opts)
       return true
     end,
   })
+  -- The operation in progress (lua/currantgit/operation.lua): fugitive's
+  -- rebase keys, extended to merge, cherry-pick and revert. Merge has no
+  -- --skip, so rs is not offered for it.
+  for _, op in ipairs({
+    { id = "operation.continue", key = "rr", verb = "continue", label = "continue" },
+    { id = "operation.skip", key = "rs", verb = "skip", label = "skip", desc = "skip the stopped commit" },
+    { id = "operation.abort", key = "ra", verb = "abort", label = "abort", desc = "abort, after confirming" },
+  }) do
+    actions.register({
+      id = op.id,
+      label = op.label,
+      key = op.key,
+      desc = op.desc,
+      is_available = function(context)
+        local current = context.buffer and vim.b[context.buffer].currantgit_title == "status"
+          and vim.b[context.buffer].currantgit_operation
+        if not current then return false end
+        return op.verb ~= "skip" or current.kind ~= "merge"
+      end,
+      run = function(context)
+        context.operation(op.verb)
+        return true
+      end,
+    })
+  end
+  actions.register({
+    id = "conflict.restore",
+    label = "restore conflict",
+    key = "R",
+    desc = "recreate the original conflict, after confirming",
+    applies_to = { "conflict-file" },
+    is_available = function(_, item)
+      -- Only text conflicts with both sides: what `git checkout -m` can
+      -- recreate as markers.
+      return item.total ~= nil and not item.missing and not item.binary
+    end,
+    run = function(context, item)
+      context.restore_conflict(item)
+      return true
+    end,
+  })
   -- Fugitive's commit keys. Offered on status only; Git itself refuses what
   -- cannot work (nothing staged, nothing to amend) and changes nothing.
   for _, commit in ipairs({
@@ -1929,7 +2162,10 @@ function M.setup(opts)
     key = "-",
     applies_to = { "change", "conflict-file" },
     run = function(context, item)
-      if item.status ~= "??" and item.status:sub(1, 1) ~= " " then
+      -- A conflict's XY code is not a staged/unstaged pair: unstaging it
+      -- (`git restore --staged`) would silently replace all three stages
+      -- with HEAD's version. On a conflict row, `-` marks it resolved.
+      if item.kind ~= "conflict-file" and item.status ~= "??" and item.status:sub(1, 1) ~= " " then
         context.unstage(item)
       else
         context.stage(item)
