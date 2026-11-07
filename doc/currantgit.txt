@@ -7,6 +7,7 @@ COMMANDS                                                |currantgit-commands|
 STATUS                                                    |currantgit-status|
 COMMITTING                                              |currantgit-commit|
 CONFLICTS                                              |currantgit-conflicts|
+OPERATIONS                                            |currantgit-operations|
 DIFF SPLIT                                            |currantgit-diff-split|
 LOG                                                          |currantgit-log|
 CONFIGURATION                                      |currantgit-configuration|
@@ -288,9 +289,22 @@ In status:
 <CR>                    On a conflict row, open the resolver in a new tab.
 ]x  [x                  Jump to the next/previous conflict row. Stops at the
                         ends, like |]c|.
-s  -  d  b              Stage, toggle, diff, and blame behave as on a change
-                        item (staging is `git add`, i.e. Git's own "mark
-                        resolved"). Discard and unstage are not offered.
+s  -                    Mark the file resolved (`git add`). Both refuse
+                        while the file on disk still has a line that opens
+                        or closes a conflict region (`<<<<<<<`, `>>>>>>>`,
+                        at the length the `conflict-marker-size` attribute
+                        sets), or while it has unsaved edits in a buffer,
+                        and say why. `:Git add {path}` stages it anyway. On a
+                        conflict row `-` only ever stages. Visual `s` and `-`
+                        stage the selected rows that pass and name the rest.
+d  b                    Diff and blame, as on a change item.
+R                       Recreate the file's original conflict with
+                        `git checkout -m`, after confirming. Edits to the
+                        file are lost; staged resolutions of other files are
+                        not touched. Offered for text conflicts with both
+                        sides; refused while the file has unsaved edits.
+
+Discard and unstage are not offered on conflict rows.
 
 The resolver is ours (stage 2, read-only) | result (the real file) | theirs
 (stage 3, read-only), all in native |diff-mode|, so |]c| and |[c| work. With
@@ -384,6 +398,39 @@ CurrantGitDiffOldText           Changed text on old-side lines
 CurrantGitDiffNew               New-side diff lines (cool tint)
 CurrantGitDiffNewText           Changed text on new-side lines
 CurrantGitDiffFiller            Hatched filler (faint, instead of DiffDelete)
+
+===============================================================================
+OPERATIONS                                               *currantgit-operations*
+
+While a rebase, merge, cherry-pick or revert is in progress, status shows it
+under the branch, for example:
+
+    Rebasing side onto 1a2b3c4 (2/3)
+    Merging 9f8e7d6
+
+It is read from the repository's git dir the way Git's own `git-prompt.sh`
+does (`rebase-merge/`, `rebase-apply/`, `MERGE_HEAD`, `CHERRY_PICK_HEAD`,
+`REVERT_HEAD`, `sequencer/todo`), so a linked worktree shows its own.
+`git am` and bisect are not recognized.
+
+These keys exist only while an operation is in progress, so `r` (refresh)
+never waits on them otherwise:
+
+rr                      Continue (`git <operation> --continue`). Git opens
+                        the commit message in a split when it wants one
+                        (rebase, merge); cherry-pick and revert commit
+                        directly. With unmerged files left, Git refuses and
+                        nothing changes.
+rs                      Skip the stopped commit (`--skip`). Not offered for
+                        a merge: Git has no `merge --skip`.
+ra                      Abort (`--abort`), after confirming. Everything the
+                        operation did, including resolutions, is lost.
+
+Fugitive maps `rr`, `rs` and `ra` for rebases only. CurrantGit uses the same
+keys for merge, cherry-pick and revert. If the operation on disk changed
+since status was drawn, these keys refuse and ask you to press `r`.
+
+CurrantGitOperation     The operation line (WarningMsg)
 
 ===============================================================================
 LOG                                                             *currantgit-log*

@@ -3,7 +3,7 @@ package.path = vim.env.CURRANTGIT_ROOT .. "/tests/?.lua;" .. package.path
 
 local harness = require("e2e.harness")
 local scenarios = {}
-for _, file in ipairs({ "e2e.scenarios", "e2e.commit", "e2e.commit_edges" }) do
+for _, file in ipairs({ "e2e.scenarios", "e2e.commit", "e2e.commit_edges", "e2e.operations", "e2e.operations_edges" }) do
   vim.list_extend(scenarios, require(file))
 end
 local ok = harness.run(scenarios, arg[1])
